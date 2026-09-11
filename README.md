@@ -11,7 +11,10 @@ atlas/       generated output: repos/*.json, graph.json, docs/, index.md, logs/
 
 ## 1. Prerequisites
 
-- Python 3.11+ (for `tomllib`) and git. Linux or macOS; the paths below are POSIX.
+- git, and [uv](https://docs.astral.sh/uv/). Linux or macOS; the paths below are POSIX.
+- No Python setup needed. Both scripts carry PEP 723 inline metadata, so `uv` provisions a
+  3.11+ interpreter (required for `tomllib`) and, for the MCP server, the `mcp` package.
+  `atlas.py` itself is stdlib-only, so `python3 atlas.py` also works on any 3.11+ system.
 - Kiro CLI v3, logged in. For unattended runs without a browser session, set `KIRO_API_KEY` (Pro, Pro+, or Power).
 - Clones of every repo under one or two root folders. Use dedicated clones (`atlas-src`), not your working copies, because `--pull` fast-forwards them.
 
@@ -19,11 +22,14 @@ atlas/       generated output: repos/*.json, graph.json, docs/, index.md, logs/
 
 ```bash
 cd ~/atlas-mcp
-python3 -m venv .venv
-.venv/bin/pip install mcp                      # 1.x and 2.x both work
 cp config.example.json config.json
+uv run --locked --script atlas_mcp.py < /dev/null   # warm the dependency cache once
 kiro-cli chat --list-models          # confirm the Haiku model id, put it in config.json "model"
 ```
+
+That warm-up matters: `atlas_mcp.py.lock` pins `mcp` and its 29 transitive dependencies by
+hash, but the first run still downloads them. Doing it by hand keeps Kiro from having to
+resolve during MCP startup, where a slow or offline resolve looks like a broken server.
 
 Edit `config.json`:
 
@@ -38,17 +44,17 @@ Edit `config.json`:
 ## 3. Pilot, then full run
 
 ```bash
-.venv/bin/python atlas.py generate --dry-run          # spends nothing
-.venv/bin/python atlas.py generate --only a b c       # a representative mix
+uv run --script atlas.py generate --dry-run          # spends nothing
+uv run --script atlas.py generate --only a b c       # a representative mix
 ```
 
 Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`:
 
-- `.venv/bin/python atlas.py unresolved --top 25` groups every unmatched consume by target. This is the fastest way to see what the join is missing. Entries with `candidates=` were deliberately not linked because the match was weak and ambiguous.
+- `uv run --script atlas.py unresolved --top 25` groups every unmatched consume by target. This is the fastest way to see what the join is missing. Entries with `candidates=` were deliberately not linked because the match was weak and ambiguous.
 - Many `unresolved` consumes that are really internal: the provider repo is missing that name in `identifiers`. Rerun it with `--only NAME --full`.
 - `dropped_without_evidence` in a manifest's `_meta`: items the model claimed without a real file. Some is normal; lots means the repo needs a stronger model (set `model` and use `--only`).
 
-Then run everything: `.venv/bin/python atlas.py generate`.
+Then run everything: `uv run --script atlas.py generate`.
 
 ## 4. Connect Kiro (global)
 
@@ -68,10 +74,10 @@ Then run everything: `.venv/bin/python atlas.py generate`.
 | Up to `max_changed_files_for_update` relevant files changed | update (old entry + changed file list) | small |
 | New repo, big change, history rewritten, or last full run older than `full_regen_days` | full | normal |
 
-Schedule it, for example every 6 hours with cron:
+Schedule it, for example every 6 hours with cron. Spell out the path to `uv` from `which uv`; cron has a minimal PATH, the same reason `kiro_bin` needs an absolute path:
 
 ```
-0 */6 * * * cd $HOME/atlas-mcp && .venv/bin/python atlas.py generate --pull >> $HOME/atlas/cron.log 2>&1
+0 */6 * * * cd $HOME/atlas-mcp && $HOME/.local/bin/uv run --script atlas.py generate --pull >> $HOME/atlas/cron.log 2>&1
 ```
 
 **Pick an interval longer than a full run.** A first run over 100 repos can take `repos / parallel * timeout_minutes` in the worst case (roughly 11 hours at the defaults), so a 2-hour cron would start stacking runs. A lock file (`atlas/.generate.lock`) makes a second run exit immediately rather than double-spend credits, so a short interval is safe but pointless. Where `flock` is unavailable, clear a lock left by a killed process with `--force-unlock`.
@@ -94,8 +100,21 @@ Schedule it, for example every 6 hours with cron:
 ## Development
 
 ```bash
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest tests/ -q
+uv run --group dev pytest
 ```
 
+`pyproject.toml` holds the test configuration and the dev dependency group. It deliberately
+sets `package = false`: this is two standalone scripts, not an installable package, so nothing
+is ever built or installed. Runtime dependencies live in each script's `# /// script` header
+instead, because `uv run --script` ignores `pyproject.toml` entirely.
+
+Two lockfiles, with different jobs:
+
+- `atlas_mcp.py.lock` pins the MCP server's runtime, `mcp` plus its 29 transitive packages, by
+  hash. This is the one that matters operationally, because Kiro launches the server with
+  `--locked`.
+- `uv.lock` pins the dev toolchain so the test suite is reproducible.
+
 The tests cover the deterministic core (discovery and naming, package extraction, evidence gating, the graph join and its match tiers, the lock, and the MCP tools) with no Kiro calls and no credits spent.
+
+To move to a newer `mcp`, edit the pin in the `# /// script` block at the top of `atlas_mcp.py`, run `uv lock --script atlas_mcp.py`, and commit the regenerated lockfile. The server supports both `mcp` 1.x and 2.x, so the pin is for reproducibility in unattended runs rather than compatibility.
