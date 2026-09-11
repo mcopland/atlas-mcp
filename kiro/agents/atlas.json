@@ -1,0 +1,15 @@
+{
+  "name": "atlas",
+  "description": "Everyday agent with the org atlas attached: repo index, dependency graph, per-repo docs, and the atlas rules.",
+  "tools": ["*"],
+  "allowedTools": ["@atlas/*"],
+  "includeMcpJson": true,
+  "mcpServers": {
+    "atlas": {
+      "command": "/ABSOLUTE/PATH/TO/uv",
+      "args": ["run", "--locked", "--script", "/ABSOLUTE/PATH/TO/atlas-mcp/atlas_mcp.py"],
+      "env": { "ATLAS_DIR": "/ABSOLUTE/PATH/TO/atlas" }
+    }
+  },
+  "resources": ["file://../steering/atlas.md"]
+}

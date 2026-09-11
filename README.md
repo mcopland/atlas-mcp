@@ -58,12 +58,29 @@ Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`:
 
 Then run everything: `uv run --script atlas.py generate`.
 
-## 4. Connect Kiro (global)
+## 4. Connect Kiro
 
-1. Merge `kiro/mcp.json` into `~/.kiro/settings/mcp.json`. Use absolute paths; Kiro does not inherit your shell PATH.
-2. Copy `kiro/steering/atlas.md` to `~/.kiro/steering/atlas.md`.
-3. Optionally merge `kiro/permissions.yaml` into `~/.kiro/settings/permissions.yaml` (edit paths) to stop the atlas tools prompting on each call.
-4. Start a new `kiro-cli` session, run `/mcp` to confirm `atlas` is connected, then ask something like "what depends on payments-service?"
+Copy `kiro/steering/atlas.md` to `~/.kiro/steering/atlas.md`, then pick one of the two
+registrations below. Do not do both: each one registers a server named `atlas`.
+
+**An agent (recommended).** Copy `kiro/agents/atlas.json` to `~/.kiro/agents/atlas.json` and
+edit the absolute paths. It declares the atlas server, pre-approves its tools, and lists the
+steering file in `resources` (the relative path resolves from the agent file, so keep the file
+in `~/.kiro/agents/`). Use it with `kiro-cli chat --agent atlas`.
+
+**The global MCP file.** Merge `kiro/mcp.json` into `~/.kiro/settings/mcp.json` using absolute
+paths, because Kiro does not inherit your shell PATH. Optionally merge `kiro/permissions.yaml`
+into `~/.kiro/settings/permissions.yaml` (edit paths) to stop the atlas tools prompting on each
+call.
+
+Either way, start a new `kiro-cli` session, run `/mcp` to confirm `atlas` is connected, then
+ask something like "what depends on payments-service?"
+
+The agent is the recommended path because a steering file in `~/.kiro/steering/` is not
+injected when the workspace has its own `.kiro/steering/`, which is the normal case in an org
+repo ([kirodotdev/Kiro#8121](https://github.com/kirodotdev/Kiro/issues/8121),
+[aws/amazon-q-developer-cli#3719](https://github.com/aws/amazon-q-developer-cli/issues/3719)).
+An agent that lists the file as a resource loads it either way.
 
 ## 5. Keep it current
 
