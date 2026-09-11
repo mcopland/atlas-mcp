@@ -1,0 +1,13 @@
+rules:
+  # atlas tools are read-only; no prompt on each call
+  - capability: mcp
+    match: ["atlas/*"]
+    effect: allow
+  # let the agent open per-repo docs outside the workspace
+  - capability: fs_read
+    match: ["/ABSOLUTE/PATH/TO/atlas/**"]
+    effect: allow
+  # optional: let the agent verify evidence in the atlas mirror clones
+  # - capability: fs_read
+  #   match: ["/ABSOLUTE/PATH/TO/atlas-src/**"]
+  #   effect: allow
