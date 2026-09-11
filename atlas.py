@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 try:
@@ -52,6 +53,9 @@ GENERIC_IDENTIFIERS = {"api", "app", "web", "db", "service", "services", "server
                        "client", "gateway", "internal", "main", "default", "www", "localhost"}
 ENV_SUFFIX = re.compile(r"_(?:BASE_URL|URL|URI|HOSTNAME|HOST|ENDPOINT|ADDRESS|ADDR|PORT)$")
 RANK = {"exact": 0, "alias": 1, "envvar": 2}
+GRADLE_DEP = re.compile(r"""\b(?:implementation|api|compile|compileOnly|runtimeOnly
+                        |testImplementation|testCompileOnly|annotationProcessor|kapt)
+                        \b[\s(]+['"]([^'":\s]+):([^'":\s]+)""", re.X)
 MAX_PROMPT_BYTES = 96 * 1024
 TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 
@@ -241,6 +245,21 @@ def norm_pkg(eco, name):
     return name
 
 
+def local(el):
+    return el.tag.split("}")[-1] if isinstance(el.tag, str) else ""
+
+
+def child_text(el, name):
+    return next(((c.text or "").strip() for c in el if local(c) == name), "")
+
+
+def coord(group, artifact):
+    """Maven coordinate; a placeholder such as ${project.groupId} is not a real package."""
+    if not artifact or "${" in f"{group}{artifact}":
+        return ""
+    return f"{group}:{artifact}".strip(":")
+
+
 def extract_packages(repo):
     publishes, depends = {}, {}
 
@@ -252,7 +271,9 @@ def extract_packages(repo):
         if name:
             depends.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
 
-    for f in walk(repo, {"package.json", "go.mod", "pyproject.toml", "requirements*.txt"}):
+    wanted = {"package.json", "go.mod", "pyproject.toml", "requirements*.txt", "pom.xml",
+              "build.gradle", "build.gradle.kts", "Cargo.toml", "*.csproj"}
+    for f in walk(repo, wanted):
         try:
             text = f.read_text(errors="replace")
             if f.name == "package.json":
@@ -286,6 +307,52 @@ def extract_packages(repo):
                     m = re.match(r"\s*([A-Za-z0-9_.\-]+)", line)
                     if m and not line.strip().startswith(("#", "-")):
                         dep("pypi", m.group(1), f)
+            elif f.name == "pom.xml":
+                root = ET.fromstring(text)
+                parent = next((c for c in root if local(c) == "parent"), None)
+                group = child_text(root, "groupId") or (
+                    child_text(parent, "groupId") if parent is not None else "")
+                pub("maven", coord(group, child_text(root, "artifactId")), f)
+                for node in root.iter():
+                    if local(node) == "dependency":
+                        dep("maven", coord(child_text(node, "groupId"),
+                                           child_text(node, "artifactId")), f)
+            elif f.name.startswith("build.gradle"):
+                for m in re.finditer(GRADLE_DEP, text):
+                    dep("maven", coord(m.group(1), m.group(2)), f)
+                group = re.search(r"""^\s*group\s*=?\s*['"]([^'"]+)['"]""", text, re.M)
+                root_name = ""
+                for settings in ("settings.gradle", "settings.gradle.kts"):
+                    path = f.parent / settings
+                    if path.exists():
+                        m = re.search(r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""",
+                                      path.read_text(errors="replace"))
+                        root_name = m.group(1) if m else ""
+                        break
+                if group and root_name:
+                    pub("maven", coord(group.group(1), root_name), f)
+            elif f.name == "Cargo.toml":
+                data = tomllib.loads(text)
+                name = (data.get("package") or {}).get("name")
+                pub("cargo", name if isinstance(name, str) else None, f)
+                sections = ("dependencies", "dev-dependencies", "build-dependencies")
+                for section in sections:
+                    for n in (data.get(section) or {}):
+                        dep("cargo", n, f)
+                for n in ((data.get("workspace") or {}).get("dependencies") or {}):
+                    dep("cargo", n, f)
+            elif f.name.endswith(".csproj"):
+                root = ET.fromstring(text)
+                ident = ""
+                for node in root.iter():
+                    if local(node) in ("PackageId", "AssemblyName") and not ident:
+                        ident = (node.text or "").strip()
+                pub("nuget", ident or f.stem, f)
+                for node in root.iter():
+                    if local(node) == "PackageReference":
+                        name = node.get("Include") or node.get("Update") or ""
+                        if "$(" not in name:
+                            dep("nuget", name, f)
         except Exception as e:  # malformed manifests should not stop the run
             print(f"warn: could not parse {f}: {e}", file=sys.stderr)
 

@@ -3,7 +3,7 @@ You are mapping this repository for an organization-wide architecture atlas that
 This is a read-only task. Do not create, edit, or delete files. Do not run shell commands. Use only file reading, listing, and search tools.
 
 Explore efficiently, in roughly this order:
-1. README, build manifests (package.json, go.mod, pyproject.toml, pom.xml, build.gradle), CODEOWNERS.
+1. README, build manifests (package.json, go.mod, pyproject.toml, pom.xml, build.gradle, Cargo.toml, *.csproj), CODEOWNERS.
 2. Deployment and runtime config: Dockerfile, docker-compose, k8s manifests, Helm charts, Terraform, serverless configs, env example files.
 3. API definitions: OpenAPI or Swagger, .proto, GraphQL schemas, AsyncAPI, route registration.
 4. Entrypoints, then code that talks to other systems: HTTP clients, gRPC stubs, queue producers and consumers, database connections, SDK clients for other internal services.
