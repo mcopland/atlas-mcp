@@ -203,7 +203,8 @@ def search(query: str, limit: int = 10) -> str:
 @server.tool()
 def freshness(name: str = "") -> str:
     """Compare the commit each atlas entry was generated from with the repo's current local HEAD.
-    Omit name to check every repo. Stale entries may not reflect recent changes; verify in source."""
+    Omit name to check every repo, which reports the total checked but lists only the entries that
+    are not fresh. Stale entries may not reflect recent changes; verify in source."""
     g = store.load()
     if name:
         repo, err = resolve(name)
@@ -217,21 +218,38 @@ def freshness(name: str = "") -> str:
         r = g["repos"][n]
         row = {"repo": n, "atlas_commit": r["commit"][:12], "generated_at": r["generated_at"]}
         try:
-            head = subprocess.run(["git", "-C", r["repo_path"], "rev-parse", "HEAD"], capture_output=True,
-                                  text=True, timeout=5).stdout.strip()
+            head = subprocess.run(["git", "-C", r["repo_path"], "rev-parse", "HEAD"],
+                                  capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=5).stdout.strip()
             if not head:
                 row["status"] = "missing"
             elif head == r["commit"]:
                 row["status"] = "fresh"
             else:
-                behind = subprocess.run(["git", "-C", r["repo_path"], "rev-list", "--count", f"{r['commit']}..HEAD"],
-                                        capture_output=True, text=True, timeout=5).stdout.strip()
+                behind = subprocess.run(
+                    ["git", "-C", r["repo_path"], "rev-list", "--count", f"{r['commit']}..HEAD"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=5).stdout.strip()
                 row.update(status="stale", head=head[:12], commits_behind=int(behind) if behind.isdigit() else None)
         except Exception as e:
             row["status"] = f"error: {e}"
         rows.append(row)
     stale = sum(1 for r in rows if r["status"] != "fresh")
     return out({"checked": len(rows), "not_fresh": stale, "repos": rows if name else [r for r in rows if r["status"] != "fresh"], "graph_generated_at": g["generated_at"]})
+
+
+@server.tool()
+def get_doc(name: str) -> str:
+    """The rendered markdown doc for one repo: summary, overview, exposes, consumes with their
+    resolved targets, dependents, datastores, and a component diagram. Use after get_repo when
+    you want the prose and the diagram rather than structured fields."""
+    repo, err = resolve(name)
+    if err:
+        return out(err)
+    path = Path(store.load()["repos"][repo]["doc"])
+    if not path.exists():
+        return out({"error": f"no doc at {path}; run atlas.py build"})
+    return path.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":
