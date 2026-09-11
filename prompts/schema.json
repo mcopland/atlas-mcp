@@ -1,0 +1,37 @@
+{
+  "summary": "one sentence: what this repo is and why it exists",
+  "overview": "2-4 short paragraphs: purpose, main flows, notable design decisions",
+  "domain": "business domain (see allowed list)",
+  "kind": "service | library | frontend | infra | job | tool | other",
+  "languages": ["go"],
+  "owners": ["from CODEOWNERS or similar, else empty"],
+  "identifiers": ["every name others use to reach or import this repo: service names, hostnames, k8s service names, image names, package names"],
+  "exposes": [
+    {"kind": "http | grpc | graphql | websocket | topic | queue | event | package | database | cli | other",
+     "name": "short human label, e.g. POST /orders or OrderCreated",
+     "key": "exact string consumers use: hostname or service name for APIs, topic or queue name, package name",
+     "detail": "one line: protocol, auth, payload, sync or async",
+     "evidence": "repo-relative/path/to/file.ext:line"}
+  ],
+  "consumes": [
+    {"kind": "same kinds as exposes",
+     "name": "short label of what is used",
+     "key": "literal target found in code or config: URL host, service name, env var default, topic, package",
+     "detail": "one line: why it is called, sync or async, retries",
+     "evidence": "repo-relative/path/to/file.ext:line"}
+  ],
+  "datastores": [
+    {"kind": "postgres | mysql | dynamodb | redis | s3 | elasticsearch | other",
+     "name": "database, table, bucket, or cluster name",
+     "access": "owner | read | write | read-write",
+     "evidence": "repo-relative/path/to/file.ext:line"}
+  ],
+  "components": [
+    {"name": "api", "path": "repo-relative/dir", "role": "one line"}
+  ],
+  "component_edges": [
+    {"from": "api", "to": "store", "label": "reads and writes orders"}
+  ],
+  "entrypoints": ["repo-relative paths to main files, handlers, or job definitions"],
+  "notes": ["uncertainties, guesses, and gaps go here, not in the lists above"]
+}
