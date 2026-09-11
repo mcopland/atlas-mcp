@@ -1,0 +1,4 @@
+# Normalise to LF both in the repository and in working trees. The deployment
+# target is POSIX, but editing happens on Windows, so without this the two
+# disagree about line endings and every tool-assisted edit reports a diff.
+* text=auto eol=lf
