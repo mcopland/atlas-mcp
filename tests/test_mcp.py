@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -163,10 +164,46 @@ def test_get_doc_reports_a_missing_doc(loaded):
     assert "no doc" in got["error"]
 
 
-def test_freshness_flags_a_missing_repo_path(loaded):
-    got = json.loads(atlas_mcp.freshness("orders"))
-    assert got["repos"][0]["status"] in {"missing", "stale"} or \
-        got["repos"][0]["status"].startswith("error")
+def test_freshness_flags_a_repo_path_that_is_gone(loaded):
+    status = json.loads(atlas_mcp.freshness("orders"))["repos"][0]["status"]
+    assert status == "missing" or status.startswith("error")
+
+
+def test_freshness_without_a_name_lists_only_entries_that_are_not_fresh(loaded):
+    got = json.loads(atlas_mcp.freshness())
+    assert got["checked"] == 3
+    assert got["not_fresh"] == 3
+    assert all(r["status"] != "fresh" for r in got["repos"])
+
+
+def test_freshness_reports_fresh_then_stale_after_a_commit(atlas_env, tmp_path):
+    repo = tmp_path / "orders"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (repo / "f.txt").write_text("one")
+    git("add", "-A")
+    git("commit", "-qm", "one")
+    row = repo_row(tmp_path, "orders")
+    row["repo_path"] = str(repo)
+    row["commit"] = git("rev-parse", "HEAD")
+    atlas_env({"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [],
+               "shared_datastores": []}, {"orders": manifest("orders")})
+
+    assert json.loads(atlas_mcp.freshness("orders"))["repos"][0]["status"] == "fresh"
+
+    (repo / "f.txt").write_text("two")
+    git("add", "-A")
+    git("commit", "-qm", "two")
+    got = json.loads(atlas_mcp.freshness("orders"))["repos"][0]
+    assert got["status"] == "stale"
+    assert got["commits_behind"] == 1
 
 
 def test_store_reloads_when_the_graph_changes(loaded, atlas_env, tmp_path):

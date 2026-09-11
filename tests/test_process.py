@@ -250,3 +250,19 @@ def test_parse_output_rejects_a_transcript_without_a_block():
 def test_parse_output_rejects_a_block_broken_by_hard_wrapping():
     with pytest.raises(ValueError):
         atlas.parse_output('<<<ATLAS_JSON\n{"summary": "a very long\nvalue"}\nATLAS_JSON>>>')
+
+
+def test_timeout_is_logged_and_blamed_on_approval(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg()
+    log = tmp_path / "logs" / "svc.log"
+
+    def boom(*_a, **_k):
+        raise atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1,
+                                              output=b"partial output")
+
+    monkeypatch.setattr(atlas.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="approval"):
+        atlas.run_kiro(cfg, tmp_path, "p", log)
+    text = log.read_text(encoding="utf-8")
+    assert "TIMEOUT" in text
+    assert "partial output" in text

@@ -152,3 +152,63 @@ def test_repo_map_warns_when_a_path_changes_name(make_cfg, capsys, tmp_path):
     capsys.readouterr()
     atlas.save_repo_map(cfg, {"team-a-svc": tmp_path / "src" / "svc"})
     assert "renamed" in capsys.readouterr().err
+
+
+def _gen_args(**overrides):
+    args = {"only": None, "limit": None, "full": False, "pull": False, "dry_run": False,
+            "no_build": False, "force_unlock": False}
+    args.update(overrides)
+    return argparse.Namespace(**args)
+
+
+def _stub_manifest(*_a, **_k):
+    return {"summary": "s", "overview": "o", "domain": "unassigned", "kind": "service",
+            "identifiers": [], "exposes": [], "consumes": [], "datastores": []}
+
+
+def test_generate_writes_the_map_the_graph_and_the_docs(make_repo, make_cfg, monkeypatch):
+    make_repo("svc-a")
+    make_repo("svc-b")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit) as e:
+        atlas.cmd_generate(cfg, _gen_args())
+    assert e.value.code == 0
+    ad = cfg["atlas_dir"]
+    assert set(json.loads((ad / "repos.json").read_text())) == {"svc-a", "svc-b"}
+    assert set(json.loads((ad / "graph.json").read_text())["repos"]) == {"svc-a", "svc-b"}
+    assert (ad / "docs" / "svc-a.md").exists()
+    assert (ad / "index.md").exists()
+
+
+def test_generate_reports_a_failed_repo_and_keeps_the_others(make_repo, make_cfg,
+                                                             monkeypatch, capsys):
+    make_repo("good")
+    make_repo("bad")
+    cfg = make_cfg()
+
+    def flaky(cfg_, repo, prompt, log):
+        if repo.name == "bad":
+            raise RuntimeError("kiro exploded")
+        return _stub_manifest()
+
+    monkeypatch.setattr(atlas, "run_kiro", flaky)
+    with pytest.raises(SystemExit) as e:
+        atlas.cmd_generate(cfg, _gen_args())
+    assert e.value.code == 1
+    repos = cfg["atlas_dir"] / "repos"
+    assert (repos / "good.json").exists()
+    assert not (repos / "bad.json").exists()
+    assert "ERROR" in capsys.readouterr().err
+
+
+def test_generate_only_selects_a_subset(make_repo, make_cfg, monkeypatch):
+    make_repo("svc-a")
+    make_repo("svc-b")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args(only=["svc-a"]))
+    repos = cfg["atlas_dir"] / "repos"
+    assert (repos / "svc-a.json").exists()
+    assert not (repos / "svc-b.json").exists()
