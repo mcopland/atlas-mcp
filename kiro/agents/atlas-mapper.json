@@ -1,0 +1,9 @@
+{
+  "name": "atlas-mapper",
+  "description": "Read-only agent used by atlas.py to map one repo. No MCP servers, no writes, no shell.",
+  "tools": ["read"],
+  "allowedTools": ["read"],
+  "includeMcpJson": false,
+  "mcpServers": {},
+  "resources": []
+}

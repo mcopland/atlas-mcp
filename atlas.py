@@ -75,6 +75,7 @@ def load_config(path):
     cfg["atlas_dir"] = expand(cfg.get("atlas_dir", "~/atlas"))
     defaults = {"repo_roots": [], "repos": [], "exclude_repos": [], "repo_names": {},
                 "kiro_bin": "kiro-cli", "model": "claude-haiku-4.5", "kiro_extra_args": [],
+                "kiro_agent": "atlas-mapper",
                 "parallel": 3, "timeout_minutes": 20, "full_regen_days": 30,
                 "max_changed_files_for_update": 150, "max_ambiguous_hits": 3,
                 "domains": [], "ignore_changes": [], "generic_identifiers": []}
@@ -326,7 +327,9 @@ def log_append(log_path, text):
 
 
 def run_kiro(cfg, repo, prompt, log_path):
-    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--model", cfg["model"], *cfg["kiro_extra_args"], prompt]
+    agent = ["--agent", cfg["kiro_agent"]] if cfg["kiro_agent"] else []
+    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--model", cfg["model"],
+           *agent, *cfg["kiro_extra_args"], prompt]
     header = (f"=== attempt {now().isoformat(timespec='seconds')} ===\n"
               f"$ {' '.join(cmd[:-1])} <prompt {len(prompt)} chars>\n")
     try:

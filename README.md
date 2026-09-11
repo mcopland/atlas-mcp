@@ -25,6 +25,7 @@ cd ~/atlas-mcp
 cp config.example.json config.json
 uv run --locked --script atlas_mcp.py < /dev/null   # warm the dependency cache once
 kiro-cli chat --list-models          # confirm the Haiku model id, put it in config.json "model"
+mkdir -p ~/.kiro/agents && cp kiro/agents/atlas-mapper.json ~/.kiro/agents/
 ```
 
 That warm-up matters: `atlas_mcp.py.lock` pins `mcp` and its 29 transitive dependencies by
@@ -35,6 +36,7 @@ Edit `config.json`:
 
 - `repo_roots`: folders containing clones (scanned 2 levels deep). `repos`: extra individual paths. `exclude_repos`: names to skip (matches either the resolved atlas name or the directory basename).
 - `kiro_bin`: absolute path from `which kiro-cli` (cron has a minimal PATH).
+- `kiro_agent`: agent passed as `--agent`, default `atlas-mapper` (installed above). Keep it; see Troubleshooting for why. Set it to `""` to use Kiro's default agent.
 - `domains`: fixed list like `["payments", "identity", "platform"]`. Strongly recommended; without it the model invents inconsistent domain names. Anything off the list is forced to `unassigned` and recorded in the manifest's `_meta.domain_rejected`.
 - `parallel`: concurrent Kiro sessions. Start at 3.
 - `repo_names`: pin a name for a clone, `{"/abs/path/to/clone": "orders-service"}`. Needed only if you want a name that differs from the directory, or want it stable regardless of what else gets cloned.
@@ -93,7 +95,7 @@ Schedule it, for example every 6 hours with cron. Spell out the path to `uv` fro
 
 - **Timeouts:** almost always a tool call waiting for approval in headless mode. Check `atlas/logs/NAME.log`, which keeps one section per attempt. Reading inside the repo is allowed by default in v3; if the model insists on other tools, pass a narrow trust flag via `kiro_extra_args` (see `kiro-cli chat --help` for `--trust-tools`), never `--trust-all-tools`.
 - **"no `<<<ATLAS_JSON` block":** the model did not finish or ignored the format. It retries once; both attempts are in the log.
-- **Mapping sessions also see the atlas tools and steering** because they are global. That is harmless, but if you want clean runs, create a read-only mapper agent without MCP and set `"kiro_extra_args": ["--agent", "atlas-mapper"]`.
+- **Mapping runs go through the `atlas-mapper` agent.** Without it, `kiro-cli` maps each repo under that repo's own workspace configuration, which means starting whatever MCP servers and hooks the repo declares, unattended, with your environment and `KIRO_API_KEY`. The shipped agent sets `includeMcpJson: false`, no MCP servers, and read-only tools. Kiro still inherits default resources such as workspace steering unless you set `chat.disableInheritingDefaultResources`; that is text in the prompt, not code that runs.
 - **Matching is string-based.** Consumes are matched to providers by hostname, service name, topic, package name, or owned datastore name. Each edge carries a `match` tier: `exact` (literal identifier or host), `alias` (the first label of a hostname), `envvar` (derived from an env var name such as `ORDERS_SERVICE_URL` -> `orders-service`), or `ambiguous` (more than one candidate). Treat anything but `exact` as a lead and check the evidence path. An identifier containing a `/` but no scheme (a Go module path, a scoped npm name) is indexed as a package name rather than a hostname, so `github.com/org/a` never makes its repo answer for `github.com`. More candidates than `max_ambiguous_hits` leaves the consume unresolved with a shortlist, except for topics and queues, where several producers of one name are normal.
 - **A repo is huge and updates keep regenerating in full.** Update prompts are capped at 96 KB; past that the run falls back to a full regeneration rather than truncating the entry. Reduce `max_changed_files_for_update` if you would rather cap the changed-file list.
 

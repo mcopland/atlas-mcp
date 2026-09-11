@@ -6,6 +6,7 @@
   "repo_names": {},
   "kiro_bin": "kiro-cli",
   "model": "claude-haiku-4.5",
+  "kiro_agent": "atlas-mapper",
   "kiro_extra_args": [],
   "parallel": 3,
   "timeout_minutes": 20,

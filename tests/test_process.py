@@ -182,3 +182,38 @@ def test_run_kiro_appends_each_attempt_to_the_log(make_repo, make_cfg, monkeypat
     atlas.run_kiro(cfg, repo, "prompt two", log)
     text = log.read_text()
     assert text.count("=== attempt") == 2
+
+
+class _Result:
+    returncode = 0
+    stderr = ""
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def _spy_run(monkeypatch, stdout='<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>'):
+    seen = {}
+
+    def spy(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["kwargs"] = kwargs
+        return _Result(stdout)
+
+    monkeypatch.setattr(atlas.subprocess, "run", spy)
+    return seen
+
+
+def test_default_command_line_uses_the_read_only_mapper_agent(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg()
+    seen = _spy_run(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--agent") + 1] == "atlas-mapper"
+
+
+def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg(kiro_agent="")
+    seen = _spy_run(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
+    assert "--agent" not in seen["cmd"]
