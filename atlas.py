@@ -72,7 +72,7 @@ def expand(p):
 
 def load_config(path):
     try:
-        cfg = json.loads(Path(path).read_text())
+        cfg = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         sys.exit(f"no config at {path}; copy config.example.json to config.json and edit it")
     except json.JSONDecodeError as e:
@@ -87,6 +87,7 @@ def load_config(path):
     for k, v in defaults.items():
         cfg.setdefault(k, v)
     cfg["generic_identifiers"] = {str(s).strip().lower() for s in cfg["generic_identifiers"]} | GENERIC_IDENTIFIERS
+    cfg["domains"] = [str(d).strip().lower() for d in cfg["domains"] if str(d).strip()]
     return cfg
 
 
@@ -133,9 +134,7 @@ def atlas_lock(atlas_dir, force=False):
         finally:
             with contextlib.suppress(Exception):
                 fcntl.flock(fh, fcntl.LOCK_UN)
-            fh.close()
-            with contextlib.suppress(OSError):
-                path.unlink()
+            fh.close()  # the file stays; unlinking it hands the next run a dead inode
         return
     if force:
         with contextlib.suppress(OSError):
@@ -145,7 +144,7 @@ def atlas_lock(atlas_dir, force=False):
     except FileExistsError:
         holder = ""
         with contextlib.suppress(OSError):
-            holder = path.read_text().strip()
+            holder = path.read_text(encoding="utf-8").strip()
         sys.exit(f"another atlas run holds {path} ({holder or 'unknown holder'}); "
                  f"if that process is dead, rerun with --force-unlock")
     try:
@@ -216,7 +215,7 @@ def save_repo_map(cfg, repos):
     old = {}
     if path.exists():
         with contextlib.suppress(Exception):
-            old = json.loads(path.read_text())
+            old = json.loads(path.read_text(encoding="utf-8"))
     was = {v: k for k, v in old.items()}
     for name, p in new.items():
         prev = was.get(p)
@@ -275,7 +274,7 @@ def extract_packages(repo):
               "build.gradle", "build.gradle.kts", "Cargo.toml", "*.csproj"}
     for f in walk(repo, wanted):
         try:
-            text = f.read_text(errors="replace")
+            text = f.read_text(encoding="utf-8", errors="replace")
             if f.name == "package.json":
                 data = json.loads(text)
                 pub("npm", data.get("name"), f)
@@ -326,7 +325,7 @@ def extract_packages(repo):
                     path = f.parent / settings
                     if path.exists():
                         m = re.search(r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""",
-                                      path.read_text(errors="replace"))
+                                      path.read_text(encoding="utf-8", errors="replace"))
                         root_name = m.group(1) if m else ""
                         break
                 if group and root_name:
@@ -366,8 +365,8 @@ def extract_packages(repo):
 # ---------- LLM extraction ----------
 
 def build_prompt(cfg, template, **values):
-    text = (KIT / "prompts" / template).read_text()
-    values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text())
+    text = (KIT / "prompts" / template).read_text(encoding="utf-8")
+    values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text(encoding="utf-8"))
     values.setdefault("DOMAINS", ", ".join(cfg["domains"] + ["unassigned"]) if cfg["domains"]
                       else "a short lowercase name of your choice")
     for k, v in values.items():
@@ -464,15 +463,21 @@ def clean_manifest(m, repo, cfg):
         kept = []
         for item in m.get(field) or []:
             if isinstance(item, dict) and evidence_ok(repo, item.get("evidence")):
+                item["kind"] = str(item.get("kind") or "").strip().lower()
                 kept.append(item)
             else:
                 dropped.append({"field": field, "item": item})
         m[field] = kept
-    for field in ("languages", "owners", "identifiers", "components", "component_edges", "entrypoints", "notes"):
-        if not isinstance(m.get(field), list):
-            m[field] = []
+    for field in ("languages", "owners", "identifiers", "entrypoints", "notes"):
+        items = m.get(field)
+        m[field] = ([str(i) for i in items if not isinstance(i, (dict, list))]
+                    if isinstance(items, list) else [])
+    for field in ("components", "component_edges"):
+        items = m.get(field)
+        m[field] = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
     for field in ("summary", "overview", "domain", "kind"):
         m[field] = str(m.get(field) or "")
+    m["kind"] = m["kind"].strip().lower()
     domain = m["domain"].strip().lower() or "unassigned"
     rejected, allowed = "", cfg["domains"]
     if allowed and domain not in set(allowed) | {"unassigned"}:
@@ -489,7 +494,7 @@ def process_repo(cfg, name, repo, args):
         except Exception as e:
             print(f"warn: {name}: pull failed: {e}", file=sys.stderr)
     head = git(repo, "rev-parse", "HEAD")
-    old = json.loads(out.read_text()) if out.exists() else None
+    old = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
     meta = (old or {}).get("_meta", {})
     mode, changed = "full", []
 
@@ -583,7 +588,7 @@ def load_manifests(ad, known):
     manifests, orphans = {}, []
     for p in sorted((ad / "repos").glob("*.json")):
         try:
-            m = json.loads(p.read_text())
+            m = json.loads(p.read_text(encoding="utf-8"))
             if not m["_meta"]["commit"]:
                 raise ValueError("empty _meta.commit")
         except Exception as e:
@@ -650,7 +655,10 @@ def build(cfg, known):
     def link(src, item, kind, key, lookups):
         hits = {}
         for fam, form, strength in lookups:
-            for repo, s in index.get((fam, str(form).strip().lower()), {}).items():
+            form = str(form).strip().lower()
+            if strength != "exact" and not alias_ok(form, stop):
+                continue
+            for repo, s in index.get((fam, form), {}).items():
                 if repo != src and repo not in hits:
                     hits[repo] = weaker(s, strength)
             if hits:
@@ -853,7 +861,10 @@ def cmd_prune(cfg, args):
     for p in orphans:
         if args.apply:
             dest.mkdir(parents=True, exist_ok=True)
-            p.rename(dest / p.name)
+            target = dest / p.name
+            if target.exists():  # keep the earlier snapshot; nothing is ever deleted
+                target = dest / f"{p.stem}.{now().strftime('%Y%m%dT%H%M%S')}.json"
+            p.replace(target)
         print(f"  {p.stem}: {'moved aside' if args.apply else 'orphan'}")
     print(f"{len(orphans)} orphans " + (f"moved to {dest}" if args.apply
                                         else f"found; rerun with --apply to move them to {dest}"))
@@ -864,7 +875,7 @@ def cmd_unresolved(cfg, args):
     if not path.exists():
         sys.exit(f"no graph at {path}; run atlas.py generate")
     groups = {}
-    for u in json.loads(path.read_text()).get("unresolved", []):
+    for u in json.loads(path.read_text(encoding="utf-8")).get("unresolved", []):
         g = groups.setdefault((u.get("kind", ""), u.get("key", "")), {"repos": set(), "candidates": set()})
         g["repos"].add(u.get("repo", ""))
         g["candidates"].update(u.get("candidates", []))
@@ -878,12 +889,15 @@ def cmd_unresolved(cfg, args):
 
 def cmd_status(cfg, _args):
     repos = discover_repos(cfg)
+    if not repos:
+        sys.exit("no repos found; check repo_roots / repos in config. Refusing to report every "
+                 "manifest as an orphan from an empty discovery.")
     for name, path in sorted(repos.items()):
         f = cfg["atlas_dir"] / "repos" / f"{name}.json"
         if not f.exists():
             print(f"  {name}: not generated")
             continue
-        meta = json.loads(f.read_text())["_meta"]
+        meta = json.loads(f.read_text(encoding="utf-8"))["_meta"]
         try:
             state = "fresh" if git(path, "rev-parse", "HEAD") == meta["commit"] else "stale"
         except Exception as e:

@@ -65,3 +65,26 @@ def test_clean_manifest_normalises_missing_fields(tmp_path, make_cfg):
     atlas.clean_manifest(m, tmp_path, make_cfg())
     assert m["languages"] == [] and m["notes"] == []
     assert m["summary"] == "" and m["domain"] == "unassigned"
+
+
+def test_clean_manifest_lowercases_repo_and_item_kinds(tmp_path, make_cfg):
+    (tmp_path / "ok.go").write_text("x")
+    m = {"kind": "Service", "exposes": [{"kind": "HTTP", "key": "a", "evidence": "ok.go"}]}
+    atlas.clean_manifest(m, tmp_path, make_cfg())
+    assert m["kind"] == "service"
+    assert m["exposes"][0]["kind"] == "http"
+
+
+def test_clean_manifest_drops_structured_entries_from_scalar_lists(tmp_path, make_cfg):
+    m = {"identifiers": ["orders", {"name": "orders"}, 7],
+         "components": [{"name": "api"}, "not-a-component"]}
+    atlas.clean_manifest(m, tmp_path, make_cfg())
+    assert m["identifiers"] == ["orders", "7"]
+    assert m["components"] == [{"name": "api"}]
+
+
+def test_clean_manifest_accepts_a_mixed_case_domain_list(tmp_path, make_cfg):
+    cfg = make_cfg(domains=["Payments", " Identity "])
+    m = {"domain": "Payments"}
+    _, rejected = atlas.clean_manifest(m, tmp_path, cfg)
+    assert (m["domain"], rejected) == ("payments", "")

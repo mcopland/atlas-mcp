@@ -212,3 +212,51 @@ def test_generate_only_selects_a_subset(make_repo, make_cfg, monkeypatch):
     repos = cfg["atlas_dir"] / "repos"
     assert (repos / "svc-a.json").exists()
     assert not (repos / "svc-b.json").exists()
+
+
+def test_load_config_normalises_the_domain_list(make_cfg):
+    cfg = make_cfg(domains=["Payments", " Identity ", ""])
+    assert cfg["domains"] == ["payments", "identity"]
+
+
+@pytest.mark.skipif(atlas.fcntl is None, reason="the O_EXCL fallback removes its lock file")
+def test_flock_keeps_the_lock_file_after_release(tmp_path):
+    ad = tmp_path / "atlas"
+    with atlas.atlas_lock(ad):
+        pass
+    assert (ad / ".generate.lock").exists()
+    with atlas.atlas_lock(ad):
+        pass
+
+
+def test_prune_apply_keeps_an_earlier_orphan_snapshot(make_repo, make_cfg, make_manifest):
+    make_repo("live")
+    cfg = make_cfg()
+    make_manifest(cfg, "live")
+    make_manifest(cfg, "gone")
+    atlas.cmd_prune(cfg, argparse.Namespace(apply=True))
+    make_manifest(cfg, "gone")
+    atlas.cmd_prune(cfg, argparse.Namespace(apply=True))
+    kept = sorted(p.name for p in (cfg["atlas_dir"] / "repos" / "_orphans").glob("gone*.json"))
+    assert len(kept) == 2
+
+
+def test_status_refuses_when_discovery_is_empty(make_cfg, make_manifest):
+    cfg = make_cfg(repo_roots=[])
+    make_manifest(cfg, "a")
+    with pytest.raises(SystemExit) as e:
+        atlas.cmd_status(cfg, argparse.Namespace())
+    assert "no repos found" in str(e.value)
+
+
+def test_status_reports_fresh_entries_and_orphans(make_repo, make_cfg, make_manifest, capsys):
+    repo = make_repo("live")
+    cfg = make_cfg()
+    m = make_manifest(cfg, "live")
+    m["_meta"]["commit"] = atlas.git(repo, "rev-parse", "HEAD")
+    atlas.write_json(cfg["atlas_dir"] / "repos" / "live.json", m)
+    make_manifest(cfg, "gone")
+    atlas.cmd_status(cfg, argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "live: fresh" in out
+    assert "gone: orphan" in out

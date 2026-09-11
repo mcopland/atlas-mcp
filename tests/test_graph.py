@@ -305,3 +305,32 @@ def test_many_producers_of_one_topic_still_link(make_cfg, make_manifest, graph_o
     g = graph_of(cfg)
     assert sorted(e["to"] for e in g["edges"]) == [f"producer-{i}" for i in range(4)]
     assert g["unresolved"] == []
+
+
+def test_a_generically_named_repo_does_not_attract_alias_matches(
+        make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "api")
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "orders", "key": "https://api.orders.internal/v1",
+         "evidence": ev()}])
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert [u["key"] for u in g["unresolved"]] == ["https://api.orders.internal/v1"]
+
+
+def test_a_generic_envvar_stem_does_not_attract_matches(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "api")
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "api", "key": "API_URL", "evidence": ev()}])
+    assert graph_of(cfg)["edges"] == []
+
+
+def test_an_exact_identifier_still_matches_a_generic_name(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "api")
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "api", "key": "api", "evidence": ev()}])
+    assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [
+        ("client", "api", "exact")]
