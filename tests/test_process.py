@@ -217,3 +217,36 @@ def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
     seen = _spy_run(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
     assert "--agent" not in seen["cmd"]
+
+
+def test_command_line_disables_line_wrapping(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg()
+    seen = _spy_run(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--wrap") + 1] == "never"
+
+
+def test_parse_output_recovers_the_block_from_a_stream_json_transcript():
+    lines = [json.dumps({"type": "assistant", "text": "<<<ATLAS_JSON\n"}),
+             json.dumps({"type": "assistant", "text": '{"summary": "s"}'}),
+             json.dumps({"type": "assistant", "text": "\nATLAS_JSON>>>\n"}),
+             json.dumps({"type": "result", "exit_code": 0})]
+    assert atlas.parse_output("\n".join(lines)) == {"summary": "s"}
+
+
+def test_parse_output_prefers_the_last_block_over_a_prompt_echo():
+    lines = [json.dumps({"type": "tool_use", "input": {"prompt": "print <<<ATLAS_JSON here"}}),
+             json.dumps({"type": "assistant",
+                         "text": '<<<ATLAS_JSON\n{"summary": "real"}\nATLAS_JSON>>>'})]
+    assert atlas.parse_output("\n".join(lines))["summary"] == "real"
+
+
+def test_parse_output_rejects_a_transcript_without_a_block():
+    with pytest.raises(ValueError):
+        atlas.parse_output(json.dumps({"type": "assistant", "text": "I could not finish"}))
+
+
+def test_parse_output_rejects_a_block_broken_by_hard_wrapping():
+    with pytest.raises(ValueError):
+        atlas.parse_output('<<<ATLAS_JSON\n{"summary": "a very long\nvalue"}\nATLAS_JSON>>>')

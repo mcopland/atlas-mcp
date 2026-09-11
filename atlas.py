@@ -53,6 +53,7 @@ GENERIC_IDENTIFIERS = {"api", "app", "web", "db", "service", "services", "server
 ENV_SUFFIX = re.compile(r"_(?:BASE_URL|URL|URI|HOSTNAME|HOST|ENDPOINT|ADDRESS|ADDR|PORT)$")
 RANK = {"exact": 0, "alias": 1, "envvar": 2}
 MAX_PROMPT_BYTES = 96 * 1024
+TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 
 
 # ---------- helpers ----------
@@ -307,17 +308,51 @@ def build_prompt(cfg, template, **values):
     return text
 
 
+def jsonl_text(text):
+    """Rebuild the assistant text from a stream-json transcript: the text-bearing fields of
+    every event, concatenated in order. Other fields, such as an echo of the prompt in a tool
+    call, are skipped so they cannot be mistaken for the answer."""
+    chunks = []
+
+    def collect(value, key=None):
+        if isinstance(value, str):
+            if key is None or key in TEXT_KEYS:
+                chunks.append(value)
+        elif isinstance(value, dict):
+            for k, item in value.items():
+                collect(item, k)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item, key)
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            collect(json.loads(line))
+        except json.JSONDecodeError:
+            return ""
+    return "".join(chunks)
+
+
 def parse_output(text):
-    s = text.rfind(START)
-    if s < 0:
-        raise ValueError("no <<<ATLAS_JSON block in Kiro output")
-    e = text.find(END, s)
-    body = text[s + len(START): e if e >= 0 else None].strip()
-    body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body)
-    data = json.loads(body)
-    if not isinstance(data, dict):
-        raise ValueError("ATLAS_JSON block is not an object")
-    return data
+    """Rendered output first, then the same text read as a stream-json transcript: a raw
+    transcript contains the markers inside JSON strings, so it matches but does not parse."""
+    for candidate in (text, jsonl_text(text)):
+        s = candidate.rfind(START)
+        if s < 0:
+            continue
+        e = candidate.find(END, s)
+        body = candidate[s + len(START): e if e >= 0 else None].strip()
+        body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            raise ValueError("ATLAS_JSON block is not an object")
+        return data
+    raise ValueError("no parseable <<<ATLAS_JSON block in Kiro output")
 
 
 def log_append(log_path, text):
@@ -328,8 +363,8 @@ def log_append(log_path, text):
 
 def run_kiro(cfg, repo, prompt, log_path):
     agent = ["--agent", cfg["kiro_agent"]] if cfg["kiro_agent"] else []
-    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--model", cfg["model"],
-           *agent, *cfg["kiro_extra_args"], prompt]
+    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--wrap", "never",
+           "--model", cfg["model"], *agent, *cfg["kiro_extra_args"], prompt]
     header = (f"=== attempt {now().isoformat(timespec='seconds')} ===\n"
               f"$ {' '.join(cmd[:-1])} <prompt {len(prompt)} chars>\n")
     try:
