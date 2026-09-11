@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "atlas": {
-      "command": "/ABSOLUTE/PATH/TO/atlas-kit/.venv/bin/python",
-      "args": ["/ABSOLUTE/PATH/TO/atlas-kit/atlas_mcp.py"],
+      "command": "/ABSOLUTE/PATH/TO/atlas-mcp/.venv/bin/python",
+      "args": ["/ABSOLUTE/PATH/TO/atlas-mcp/atlas_mcp.py"],
       "env": { "ATLAS_DIR": "/ABSOLUTE/PATH/TO/atlas" }
     }
   }

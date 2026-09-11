@@ -1,8 +1,9 @@
 {
   "atlas_dir": "~/atlas",
-  "repo_roots": ["~/src"],
+  "repo_roots": ["~/atlas-src"],
   "repos": [],
   "exclude_repos": [],
+  "repo_names": {},
   "kiro_bin": "kiro-cli",
   "model": "claude-haiku-4.5",
   "kiro_extra_args": [],
@@ -10,7 +11,9 @@
   "timeout_minutes": 20,
   "full_regen_days": 30,
   "max_changed_files_for_update": 150,
+  "max_ambiguous_hits": 3,
   "domains": [],
+  "generic_identifiers": [],
   "ignore_changes": [
     "test/*", "tests/*", "*/test/*", "*/tests/*", "*__tests__*", "*__mocks__*",
     "*_test.go", "*_test.py", "test_*.py", "*/test_*.py", "*.test.*", "*.spec.*",

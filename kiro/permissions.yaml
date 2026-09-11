@@ -3,10 +3,11 @@ rules:
   - capability: mcp
     match: ["atlas/*"]
     effect: allow
-  # let the agent open per-repo docs outside the workspace
-  - capability: fs_read
-    match: ["/ABSOLUTE/PATH/TO/atlas/**"]
-    effect: allow
+  # optional: only needed if you want the agent to open atlas files directly.
+  # get_doc already returns the per-repo doc through MCP, so this can stay off.
+  # - capability: fs_read
+  #   match: ["/ABSOLUTE/PATH/TO/atlas/**"]
+  #   effect: allow
   # optional: let the agent verify evidence in the atlas mirror clones
   # - capability: fs_read
   #   match: ["/ABSOLUTE/PATH/TO/atlas-src/**"]
