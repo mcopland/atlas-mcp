@@ -242,3 +242,66 @@ def test_mermaid_labels_are_sanitised():
     assert atlas.mid("api gateway") == "n_api_gateway"
     assert "|" not in atlas.mtext('a|b"c[d]')
     assert atlas.mtext("") == "-"
+
+
+def test_package_path_identifier_matches_only_its_own_repo(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "go-a", identifiers=["github.com/org/a"])
+    make_manifest(cfg, "go-b", identifiers=["github.com/org/b"])
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "package", "name": "a", "key": "github.com/org/a", "evidence": ev()}])
+    g = graph_of(cfg)
+    assert [(e["from"], e["to"], e["match"]) for e in g["edges"]] == [
+        ("client", "go-a", "exact")]
+
+
+def test_code_host_url_does_not_link_every_go_repo(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "go-a", identifiers=["github.com/org/a"])
+    make_manifest(cfg, "go-b", identifiers=["github.com/org/b"])
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "repo", "key": "https://github.com/org/a", "evidence": ev()}])
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert [u["key"] for u in g["unresolved"]] == ["https://github.com/org/a"]
+
+
+def test_scoped_package_identifier_does_not_provide_its_scope(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "shared", identifiers=["@org/shared"])
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "org", "key": "org", "evidence": ev()}])
+    assert graph_of(cfg)["edges"] == []
+
+
+def test_scoped_package_identifier_still_matches_a_package_consume(
+        make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "shared", identifiers=["@org/shared"])
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "package", "name": "shared", "key": "@org/shared", "evidence": ev()}])
+    assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [
+        ("client", "shared", "exact")]
+
+
+def test_too_many_exact_hits_are_capped_with_candidates(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(max_ambiguous_hits=3)
+    for i in range(4):
+        make_manifest(cfg, f"svc-{i}", identifiers=["orders.internal"])
+    make_manifest(cfg, "client", consumes=[
+        {"kind": "http", "name": "o", "key": "orders.internal", "evidence": ev()}])
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert g["unresolved"][0]["candidates"] == [f"svc-{i}" for i in range(4)]
+
+
+def test_many_producers_of_one_topic_still_link(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(max_ambiguous_hits=3)
+    for i in range(4):
+        make_manifest(cfg, f"producer-{i}", exposes=[
+            {"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": ev()}])
+    make_manifest(cfg, "consumer", consumes=[
+        {"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": ev()}])
+    g = graph_of(cfg)
+    assert sorted(e["to"] for e in g["edges"]) == [f"producer-{i}" for i in range(4)]
+    assert g["unresolved"] == []

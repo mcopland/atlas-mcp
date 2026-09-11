@@ -516,7 +516,11 @@ def build(cfg, known):
 
     for name, m in manifests.items():
         for ident in list(m.get("identifiers") or []) + [name]:
-            full, first = svc_forms(ident)
+            text = str(ident or "").strip()
+            if "/" in text and "://" not in text:  # a package path, not a host
+                provide("pkg", text, name, "exact")
+                continue
+            full, first = svc_forms(text)
             provide("svc", full, name, "exact")
             provide("svc", first, name, "alias")
         for item in m.get("exposes") or []:
@@ -547,7 +551,8 @@ def build(cfg, known):
             if hits:
                 break
         weakest = max((RANK[v] for v in hits.values()), default=0)
-        if not hits or (weakest > 0 and len(hits) > cfg["max_ambiguous_hits"]):
+        fan_in = FAMILY.get(kind) == "msg" and weakest == 0  # one topic, many producers
+        if not hits or (not fan_in and len(hits) > cfg["max_ambiguous_hits"]):
             row = {"repo": src, "kind": kind, "key": key, "name": item.get("name", key),
                    "evidence": item.get("evidence")}
             if hits:  # too many weak matches to pick from; hand the agent the shortlist
