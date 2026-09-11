@@ -30,14 +30,15 @@ class Store:
             raise RuntimeError(f"no atlas at {path}; run atlas.py generate")
         mtime = path.stat().st_mtime
         if mtime != self.mtime:
-            self.graph = json.loads(path.read_text())
+            self.graph = json.loads(path.read_text(encoding="utf-8"))
             self.manifests, self.blobs, self.mtime = {}, None, mtime
         return self.graph
 
     def manifest(self, name):
         if name not in self.manifests:
             path = ATLAS / "repos" / f"{name}.json"
-            self.manifests[name] = json.loads(path.read_text()) if path.exists() else {}
+            self.manifests[name] = (json.loads(path.read_text(encoding="utf-8"))
+                                    if path.exists() else {})
         return self.manifests[name]
 
 
@@ -53,9 +54,13 @@ def resolve(name):
     exact = [n for n in repos if n.lower() == q]
     if exact:
         return exact[0], None
-    by_ident = [n for n, r in repos.items() if q in (i.lower() for i in r.get("identifiers", []))]
+    by_ident = [n for n, r in repos.items()
+                if q in (str(i).lower() for i in r.get("identifiers", []))]
     if len(by_ident) == 1:
         return by_ident[0], None
+    if len(by_ident) > 1:  # several repos claim it; a name substring would be a guess
+        return None, {"error": f"'{name}' is claimed by several repos",
+                      "candidates": sorted(by_ident)[:15]}
     partial = [n for n in repos if q in n.lower()]
     if len(partial) == 1:
         return partial[0], None
@@ -172,7 +177,7 @@ def _blobs():
             text = lambda items: " ".join(f"{i.get('name', '')} {i.get('key', '')}" for i in items).lower()
             store.blobs[n] = [
                 (5, n.lower()),
-                (4, " ".join(m.get("identifiers", [])).lower()),
+                (4, " ".join(str(i) for i in m.get("identifiers", [])).lower()),
                 (3, m.get("summary", "").lower()),
                 (3, text(m.get("exposes", []))),  # owners outrank callers
                 (2, text(m.get("datastores", []))),
@@ -230,11 +235,13 @@ def freshness(name: str = "") -> str:
             elif head == r["commit"]:
                 row["status"] = "fresh"
             else:
-                behind = subprocess.run(
-                    ["git", "-C", r["repo_path"], "rev-list", "--count", f"{r['commit']}..HEAD"],
-                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                    timeout=5).stdout.strip()
-                row.update(status="stale", head=head[:12], commits_behind=int(behind) if behind.isdigit() else None)
+                row.update(status="stale", head=head[:12])
+                if name:  # one repo asked about: a second call per repo is affordable
+                    behind = subprocess.run(
+                        ["git", "-C", r["repo_path"], "rev-list", "--count",
+                         f"{r['commit']}..HEAD"], capture_output=True, text=True,
+                        stdin=subprocess.DEVNULL, timeout=5).stdout.strip()
+                    row["commits_behind"] = int(behind) if behind.isdigit() else None
         except Exception as e:
             row["status"] = f"error: {e}"
         rows.append(row)

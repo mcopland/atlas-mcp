@@ -20,6 +20,26 @@ def manifest(name, **fields):
     return m
 
 
+def _git(path, *args):
+    return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True,
+                          text=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+
+def _commit(path, text):
+    (path / "f.txt").write_text(text)
+    _git(path, "add", "-A")
+    _git(path, "commit", "-qm", text)
+    return _git(path, "rev-parse", "HEAD")
+
+
+def _git_repo(path, commits=1):
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "t@example.com")
+    _git(path, "config", "user.name", "t")
+    return [_commit(path, f"c{i}") for i in range(commits)]
+
+
 @pytest.fixture
 def atlas_env(tmp_path, monkeypatch):
     monkeypatch.setattr(atlas_mcp, "ATLAS", tmp_path)
@@ -178,32 +198,53 @@ def test_freshness_without_a_name_lists_only_entries_that_are_not_fresh(loaded):
 
 def test_freshness_reports_fresh_then_stale_after_a_commit(atlas_env, tmp_path):
     repo = tmp_path / "orders"
-    repo.mkdir()
-
-    def git(*args):
-        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
-                              text=True, stdin=subprocess.DEVNULL).stdout.strip()
-
-    git("init", "-q")
-    git("config", "user.email", "t@example.com")
-    git("config", "user.name", "t")
-    (repo / "f.txt").write_text("one")
-    git("add", "-A")
-    git("commit", "-qm", "one")
+    head = _git_repo(repo)[0]
     row = repo_row(tmp_path, "orders")
     row["repo_path"] = str(repo)
-    row["commit"] = git("rev-parse", "HEAD")
+    row["commit"] = head
     atlas_env({"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [],
                "shared_datastores": []}, {"orders": manifest("orders")})
 
     assert json.loads(atlas_mcp.freshness("orders"))["repos"][0]["status"] == "fresh"
 
-    (repo / "f.txt").write_text("two")
-    git("add", "-A")
-    git("commit", "-qm", "two")
+    _commit(repo, "second")
     got = json.loads(atlas_mcp.freshness("orders"))["repos"][0]
     assert got["status"] == "stale"
     assert got["commits_behind"] == 1
+
+
+def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_path,
+                                                                 monkeypatch):
+    repo = tmp_path / "orders"
+    heads = _git_repo(repo, commits=2)
+    row = repo_row(tmp_path, "orders")
+    row["repo_path"] = str(repo)
+    row["commit"] = heads[0]
+    atlas_env({"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [],
+               "shared_datastores": []}, {"orders": manifest("orders")})
+    calls = []
+    real = atlas_mcp.subprocess.run
+
+    def spy(cmd, **kwargs):
+        calls.append(list(cmd))
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(atlas_mcp.subprocess, "run", spy)
+    got = json.loads(atlas_mcp.freshness())
+    assert got["not_fresh"] == 1
+    assert got["repos"][0]["status"] == "stale"
+    assert not any("rev-list" in c for c in calls)
+
+
+def test_resolve_refuses_to_guess_when_an_identifier_is_claimed_twice(atlas_env, tmp_path):
+    repos = {"svc-a": repo_row(tmp_path, "svc-a", identifiers=["orders"]),
+             "svc-b": repo_row(tmp_path, "svc-b", identifiers=["orders"]),
+             "orders-legacy": repo_row(tmp_path, "orders-legacy")}
+    atlas_env({"generated_at": "x", "repos": repos, "edges": [], "unresolved": [],
+               "shared_datastores": []}, {n: manifest(n) for n in repos})
+    name, err = atlas_mcp.resolve("orders")
+    assert name is None
+    assert err["candidates"] == ["svc-a", "svc-b"]
 
 
 def test_store_reloads_when_the_graph_changes(loaded, atlas_env, tmp_path):
