@@ -1,0 +1,20 @@
+{
+  "atlas_dir": "~/atlas",
+  "repo_roots": ["~/src"],
+  "repos": [],
+  "exclude_repos": [],
+  "kiro_bin": "kiro-cli",
+  "model": "claude-haiku-4.5",
+  "kiro_extra_args": [],
+  "parallel": 3,
+  "timeout_minutes": 20,
+  "full_regen_days": 30,
+  "max_changed_files_for_update": 150,
+  "domains": [],
+  "ignore_changes": [
+    "test/*", "tests/*", "*/test/*", "*/tests/*", "*__tests__*", "*__mocks__*",
+    "*_test.go", "*_test.py", "test_*.py", "*/test_*.py", "*.test.*", "*.spec.*",
+    "docs/*", "*/docs/*", "*.md", "*.txt", "*.png", "*.jpg", "*.gif", "*.svg",
+    ".github/*", ".vscode/*", ".idea/*", "LICENSE", "CHANGELOG*"
+  ]
+}
