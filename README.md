@@ -134,6 +134,6 @@ Two lockfiles, with different jobs:
   `--locked`.
 - `uv.lock` pins the dev toolchain so the test suite is reproducible.
 
-The tests cover the deterministic core (discovery and naming, package extraction, evidence gating, the graph join and its match tiers, the lock, and the MCP tools) with no Kiro calls and no credits spent.
+The tests cover the deterministic core with no Kiro calls and no credits spent: discovery and naming, package extraction for npm, Go, Python, Maven, Gradle, Cargo and NuGet, evidence gating, manifest normalisation, the graph join and its match tiers, the lock, `generate` end to end, every MCP tool, and the server answering over stdio.
 
-To move to a newer `mcp`, edit the pin in the `# /// script` block at the top of `atlas_mcp.py`, run `uv lock --script atlas_mcp.py`, and commit the regenerated lockfile. The server supports both `mcp` 1.x and 2.x, so the pin is for reproducibility in unattended runs rather than compatibility.
+To move to a newer `mcp`, edit the pin in the `# /// script` block at the top of `atlas_mcp.py`, run `uv lock --script atlas_mcp.py`, and commit the regenerated lockfile. The server imports either `mcp` 1.x or 2.x, so the pin is for reproducibility in unattended runs rather than compatibility, though only the pinned 2.x is exercised by the tests.
