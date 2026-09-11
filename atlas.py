@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+"""Org atlas: map every repo with Kiro CLI, join the results into one graph, render docs.
+
+  atlas.py generate [--only NAME ...] [--limit N] [--full] [--pull] [--dry-run] [--no-build]
+  atlas.py build
+  atlas.py status
+
+Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
+  repos/<name>.json   per-repo manifest (LLM facts + deterministic package facts + _meta)
+  graph.json          joined cross-repo graph (read by atlas_mcp.py)
+  docs/<name>.md      per-repo doc with component diagram
+  docs/domains/*.md   per-domain HLD diagram
+  index.md            one line per repo
+  logs/<name>.log     raw Kiro output from the last run
+"""
+import argparse
+import concurrent.futures as cf
 import datetime as dt
 import fnmatch
 import json
@@ -465,3 +481,64 @@ def render_docs(ad, manifests, graph):
         index += [f"## {domain}", ""] + [
             f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}" for n in sorted(members)] + [""]
     (ad / "index.md").write_text("\n".join(index))
+
+
+# ---------- commands ----------
+
+def cmd_generate(cfg, args):
+    repos = discover_repos(cfg)
+    if args.only:
+        repos = {n: p for n, p in repos.items() if n in set(args.only)}
+    items = sorted(repos.items())[: args.limit] if args.limit else sorted(repos.items())
+    if not items:
+        sys.exit("no repos found; check repo_roots / repos in config")
+    print(f"{len(items)} repos, model {cfg['model']}, parallel {cfg['parallel']}")
+    errors = 0
+    with cf.ThreadPoolExecutor(max_workers=cfg["parallel"]) as pool:
+        futures = {pool.submit(process_repo, cfg, n, p, args): n for n, p in items}
+        for fut in cf.as_completed(futures):
+            try:
+                name, mode, msg = fut.result()
+                print(f"  {name}: {mode} ({msg})")
+            except Exception as e:
+                errors += 1
+                print(f"  {futures[fut]}: ERROR {e}", file=sys.stderr)
+    if not args.dry_run and not args.no_build:
+        build(cfg)
+    sys.exit(1 if errors else 0)
+
+
+def cmd_status(cfg, _args):
+    for name, path in sorted(discover_repos(cfg).items()):
+        f = cfg["atlas_dir"] / "repos" / f"{name}.json"
+        if not f.exists():
+            print(f"  {name}: not generated")
+            continue
+        meta = json.loads(f.read_text())["_meta"]
+        try:
+            state = "fresh" if git(path, "rev-parse", "HEAD") == meta["commit"] else "stale"
+        except Exception as e:
+            state = f"error: {e}"
+        print(f"  {name}: {state} ({meta['commit'][:8]}, {meta['generated_at']}, {meta['mode']})")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default=str(KIT / "config.json"))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    g = sub.add_parser("generate")
+    g.add_argument("--only", nargs="+")
+    g.add_argument("--limit", type=int)
+    g.add_argument("--full", action="store_true", help="ignore existing manifests and regenerate")
+    g.add_argument("--pull", action="store_true", help="git pull --ff-only each repo first")
+    g.add_argument("--dry-run", action="store_true", help="show what would run, spend nothing")
+    g.add_argument("--no-build", action="store_true")
+    sub.add_parser("build")
+    sub.add_parser("status")
+    args = ap.parse_args()
+    cfg = load_config(args.config)
+    {"generate": cmd_generate, "build": lambda c, a: build(c), "status": cmd_status}[args.cmd](cfg, args)
+
+
+if __name__ == "__main__":
+    main()
