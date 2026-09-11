@@ -17,6 +17,9 @@ KIT = Path(__file__).resolve().parent
 START, END = "<<<ATLAS_JSON", "ATLAS_JSON>>>"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "venv", "__pycache__", "site-packages"}
+FAMILY = {"http": "svc", "grpc": "svc", "graphql": "svc", "websocket": "svc",
+          "topic": "msg", "queue": "msg", "event": "msg", "package": "pkg", "database": "db"}
+GENERIC_STORES = {"db", "database", "postgres", "postgresql", "mysql", "redis", "cache", "s3", "dynamodb", "main", "default"}
 
 
 # ---------- helpers ----------
@@ -287,3 +290,103 @@ def process_repo(cfg, name, repo, args):
     write_json(out, manifest)
     return name, mode, (f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, "
                         f"{len(dropped)} dropped")
+
+
+# ---------- graph ----------
+
+def svc_forms(raw):
+    s = str(raw).strip().lower()
+    host = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", s)
+    host = re.split(r"[/?#]", host, maxsplit=1)[0].split("@")[-1]
+    host = re.sub(r":\d+$", "", host) or s
+    return host, host.split(".")[0]
+
+
+def build(cfg):
+    ad = cfg["atlas_dir"]
+    manifests = {p.stem: json.loads(p.read_text()) for p in sorted((ad / "repos").glob("*.json"))}
+    index = {}  # (family, form) -> {repo: strength}
+
+    def provide(family, form, repo, strength):
+        if form and len(form) >= 2:
+            slot = index.setdefault((family, form), {})
+            if slot.get(repo) != "exact":
+                slot[repo] = strength
+
+    for name, m in manifests.items():
+        for ident in m.get("identifiers", []) + [name]:
+            full, first = svc_forms(ident)
+            provide("svc", full, name, "exact")
+            provide("svc", first, name, "alias")
+        for item in m.get("exposes", []):
+            fam, key = FAMILY.get(item.get("kind"), "other"), str(item.get("key") or "")
+            if fam == "svc":
+                full, first = svc_forms(key)
+                provide("svc", full, name, "exact")
+                provide("svc", first, name, "alias")
+            elif key:
+                provide(fam, key.strip().lower(), name, "exact")
+        for p in m.get("packages", {}).get("publishes", []):
+            provide("pkg", f"{p['ecosystem']}:{p['name']}", name, "exact")
+            provide("pkg", p["name"], name, "exact")
+
+    edges, unresolved, seen = [], [], set()
+
+    def link(src, item, kind, key, lookups):
+        hits = {}
+        for fam, form, strength in lookups:
+            for repo, s in index.get((fam, form), {}).items():
+                if repo != src and repo not in hits:
+                    hits[repo] = "exact" if s == "exact" and strength == "exact" else "alias"
+            if hits:
+                break
+        if not hits:
+            unresolved.append({"repo": src, "kind": kind, "key": key, "name": item.get("name", key),
+                               "evidence": item.get("evidence")})
+        for dst, strength in hits.items():
+            sig = (src, dst, kind, key)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            edges.append({"from": src, "to": dst, "kind": kind, "key": key, "name": item.get("name", key),
+                          "detail": item.get("detail", ""), "evidence": item.get("evidence"),
+                          "match": "ambiguous" if len(hits) > 1 else strength})
+
+    for name, m in manifests.items():
+        for item in m.get("consumes", []):
+            kind, key = item.get("kind", "other"), str(item.get("key") or "")
+            if not key:
+                continue
+            fam = FAMILY.get(kind, "other")
+            if fam in ("svc", "other"):
+                full, first = svc_forms(key)
+                lookups = [("svc", full, "exact"), ("svc", first, "alias")]
+            else:
+                lookups = [(fam, key.strip().lower(), "exact")]
+            link(name, item, kind, key, lookups)
+        for p in m.get("packages", {}).get("depends_on", []):
+            key = f"{p['ecosystem']}:{p['name']}"
+            if ("pkg", key) in index or ("pkg", p["name"]) in index:  # only internal packages
+                link(name, {"name": p["name"], "evidence": p["evidence"], "detail": "declared dependency"},
+                     "package", p["name"], [("pkg", key, "exact"), ("pkg", p["name"], "exact")])
+
+    stores = {}
+    for name, m in manifests.items():
+        for ds in m.get("datastores", []):
+            key = str(ds.get("name") or "").strip().lower()
+            if key and key not in GENERIC_STORES:
+                stores.setdefault(key, {})[name] = ds.get("access", "")
+    shared = [{"name": k, "repos": v} for k, v in sorted(stores.items()) if len(v) > 1]
+
+    graph = {
+        "generated_at": now().isoformat(timespec="seconds"),
+        "repos": {n: {"summary": m.get("summary", ""), "domain": m.get("domain", "unassigned"),
+                      "kind": m.get("kind", ""), "identifiers": m.get("identifiers", []),
+                      "commit": m["_meta"]["commit"], "generated_at": m["_meta"]["generated_at"],
+                      "repo_path": m["_meta"]["repo_path"], "doc": str(ad / "docs" / f"{n}.md")}
+                  for n, m in manifests.items()},
+        "edges": edges, "unresolved": unresolved, "shared_datastores": shared,
+    }
+    write_json(ad / "graph.json", graph)
+    print(f"graph: {len(manifests)} repos, {len(edges)} edges, {len(unresolved)} unresolved, "
+          f"{len(shared)} shared datastores -> {ad / 'graph.json'}")
