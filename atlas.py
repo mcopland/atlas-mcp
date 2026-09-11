@@ -388,5 +388,80 @@ def build(cfg):
         "edges": edges, "unresolved": unresolved, "shared_datastores": shared,
     }
     write_json(ad / "graph.json", graph)
+    render_docs(ad, manifests, graph)
     print(f"graph: {len(manifests)} repos, {len(edges)} edges, {len(unresolved)} unresolved, "
           f"{len(shared)} shared datastores -> {ad / 'graph.json'}")
+
+
+# ---------- docs ----------
+
+def mid(s):
+    return "n_" + re.sub(r"\W", "_", str(s))
+
+
+def mtext(s):
+    return re.sub(r"[\"'`|<>\[\]{}()#;]", " ", str(s)).strip()[:60] or "-"
+
+
+def render_docs(ad, manifests, graph):
+    docs = ad / "docs"
+    (docs / "domains").mkdir(parents=True, exist_ok=True)
+    for old in list(docs.glob("*.md")) + list((docs / "domains").glob("*.md")):
+        old.unlink()
+
+    for name, m in manifests.items():
+        meta = m["_meta"]
+        out_edges = [e for e in graph["edges"] if e["from"] == name]
+        in_edges = [e for e in graph["edges"] if e["to"] == name]
+        lines = [f"# {name}", "", m.get("summary", ""), "",
+                 f"- Domain: {m.get('domain')} | Kind: {m.get('kind')} | Languages: {', '.join(m.get('languages', []))}",
+                 f"- Owners: {', '.join(m.get('owners', [])) or 'unknown'}",
+                 f"- Commit: `{meta['commit'][:12]}` generated {meta['generated_at']} ({meta['mode']})",
+                 f"- Path: {meta['repo_path']}", "", "## Overview", "", m.get("overview", ""), "", "## Exposes", ""]
+        lines += [f"- {e.get('kind')} `{e.get('name')}` key `{e.get('key')}`: {e.get('detail', '')} ({e.get('evidence')})"
+                  for e in m.get("exposes", [])] or ["- none found"]
+        lines += ["", "## Consumes", ""]
+        for c in m.get("consumes", []):
+            targets = [e["to"] for e in out_edges if e["key"] == c.get("key")]
+            lines.append(f"- {c.get('kind')} `{c.get('name')}` key `{c.get('key')}` -> "
+                         f"{', '.join(targets) or 'unresolved'}: {c.get('detail', '')} ({c.get('evidence')})")
+        lines += [] if m.get("consumes") else ["- none found"]
+        lines += ["", "## Used by", ""]
+        lines += [f"- {e['from']} via {e['kind']} `{e['key']}` ({e['match']})" for e in in_edges] or ["- no known dependents"]
+        lines += ["", "## Datastores", ""]
+        lines += [f"- {d.get('kind')} `{d.get('name')}` ({d.get('access')}) ({d.get('evidence')})"
+                  for d in m.get("datastores", [])] or ["- none found"]
+        if m.get("components"):
+            lines += ["", "## Components", ""]
+            lines += [f"- {c.get('name')} `{c.get('path')}`: {c.get('role')}" for c in m["components"]]
+            lines += ["", "```mermaid", "flowchart LR"]
+            lines += [f'  {mid(c.get("name"))}["{mtext(c.get("name"))}"]' for c in m["components"]]
+            lines += [f'  {mid(e.get("from"))} -->|{mtext(e.get("label", ""))}| {mid(e.get("to"))}'
+                      for e in m.get("component_edges", [])]
+            lines += ["```"]
+        if m.get("notes"):
+            lines += ["", "## Notes", ""] + [f"- {n}" for n in m["notes"]]
+        (docs / f"{name}.md").write_text("\n".join(lines) + "\n")
+
+    by_domain = {}
+    for name, r in graph["repos"].items():
+        by_domain.setdefault(r["domain"], []).append(name)
+    for domain, members in sorted(by_domain.items()):
+        members_set = set(members)
+        pairs = {}
+        for e in graph["edges"]:
+            if e["from"] in members_set or e["to"] in members_set:
+                pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
+        outsiders = {n for pair in pairs for n in pair} - members_set
+        lines = [f"# Domain: {domain}", "", "```mermaid", "flowchart LR", f'  subgraph {mid("d_" + domain)}["{mtext(domain)}"]']
+        lines += [f'    {mid(n)}["{mtext(n)}"]' for n in sorted(members)]
+        lines += ["  end"] + [f'  {mid(n)}["{mtext(n)} ({mtext(graph["repos"][n]["domain"])})"]' for n in sorted(outsiders)]
+        lines += [f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid(b)}" for (a, b), k in sorted(pairs.items())]
+        lines += ["```", ""] + [f"- {n}: {graph['repos'][n]['summary']}" for n in sorted(members)]
+        (docs / "domains" / f"{re.sub(r'[^a-z0-9_-]', '_', domain)}.md").write_text("\n".join(lines) + "\n")
+
+    index = ["# Org atlas", "", f"Generated {graph['generated_at']}. {len(manifests)} repos.", ""]
+    for domain, members in sorted(by_domain.items()):
+        index += [f"## {domain}", ""] + [
+            f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}" for n in sorted(members)] + [""]
+    (ad / "index.md").write_text("\n".join(index))
