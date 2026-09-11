@@ -13,6 +13,9 @@ try:
 except ImportError:  # Python < 3.11: pyproject parsing is skipped
     tomllib = None
 
+KIT = Path(__file__).resolve().parent
+START, END = "<<<ATLAS_JSON", "ATLAS_JSON>>>"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "venv", "__pycache__", "site-packages"}
 
 
@@ -153,3 +156,134 @@ def extract_packages(repo):
             del depends[key]
     to_list = lambda d: [{"ecosystem": e, "name": n, "evidence": ev} for (e, n), ev in sorted(d.items())]
     return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
+
+
+# ---------- LLM extraction ----------
+
+def build_prompt(cfg, template, **values):
+    text = (KIT / "prompts" / template).read_text()
+    values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text())
+    values.setdefault("DOMAINS", ", ".join(cfg["domains"] + ["unassigned"]) if cfg["domains"]
+                      else "a short lowercase name of your choice")
+    for k, v in values.items():
+        text = text.replace("{{" + k + "}}", v)
+    return text
+
+
+def parse_output(text):
+    s = text.rfind(START)
+    if s < 0:
+        raise ValueError("no <<<ATLAS_JSON block in Kiro output")
+    e = text.find(END, s)
+    body = text[s + len(START): e if e >= 0 else None].strip()
+    body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body)
+    data = json.loads(body)
+    if not isinstance(data, dict):
+        raise ValueError("ATLAS_JSON block is not an object")
+    return data
+
+
+def run_kiro(cfg, repo, prompt, log_path):
+    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--model", cfg["model"], *cfg["kiro_extra_args"], prompt]
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=cfg["timeout_minutes"] * 60, env={**os.environ, "NO_COLOR": "1"})
+    except subprocess.TimeoutExpired as e:
+        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        log_path.write_text(ANSI.sub("", partial))
+        raise RuntimeError("timed out; usually a tool call waiting for approval (see README)")
+    log_path.write_text(f"$ {' '.join(cmd[:-1])} <prompt>\nexit={r.returncode}\n\n"
+                        + ANSI.sub("", r.stdout or "") + "\n--- stderr ---\n" + ANSI.sub("", r.stderr or ""))
+    if r.returncode != 0:
+        raise RuntimeError(f"kiro-cli exited {r.returncode}; see {log_path}")
+    return parse_output(ANSI.sub("", r.stdout or ""))
+
+
+def evidence_ok(repo, evidence):
+    m = re.match(r"^\s*([^\s:#]+)", str(evidence or ""))
+    if not m:
+        return False
+    rel = m.group(1)
+    rel = rel[2:] if rel.startswith("./") else rel
+    target = (repo / rel).resolve()
+    return target.exists() and (target == repo or repo in target.parents)
+
+
+def clean_manifest(m, repo):
+    dropped = []
+    for field in ("exposes", "consumes", "datastores"):
+        kept = []
+        for item in m.get(field) or []:
+            if isinstance(item, dict) and evidence_ok(repo, item.get("evidence")):
+                kept.append(item)
+            else:
+                dropped.append({"field": field, "item": item})
+        m[field] = kept
+    for field in ("languages", "owners", "identifiers", "components", "component_edges", "entrypoints", "notes"):
+        if not isinstance(m.get(field), list):
+            m[field] = []
+    for field in ("summary", "overview", "domain", "kind"):
+        m[field] = str(m.get(field) or "")
+    m["domain"] = m["domain"].strip().lower() or "unassigned"
+    return dropped
+
+
+def process_repo(cfg, name, repo, args):
+    out = cfg["atlas_dir"] / "repos" / f"{name}.json"
+    if args.pull:
+        try:
+            git(repo, "pull", "--ff-only", timeout=300)
+        except Exception as e:
+            print(f"warn: {name}: pull failed: {e}", file=sys.stderr)
+    head = git(repo, "rev-parse", "HEAD")
+    old = json.loads(out.read_text()) if out.exists() else None
+    meta = (old or {}).get("_meta", {})
+    mode, changed = "full", []
+
+    if old and not args.full:
+        if meta.get("commit") == head:
+            return name, "skip", "up to date"
+        last_full = meta.get("last_full_at")
+        full_due = not last_full or now() - dt.datetime.fromisoformat(last_full) > dt.timedelta(days=cfg["full_regen_days"])
+        if not full_due:
+            try:
+                changed = git(repo, "diff", "--name-only", meta["commit"], head).splitlines()
+                relevant = [f for f in changed if not any(fnmatch.fnmatch(f, p) for p in cfg["ignore_changes"])]
+                if not relevant:
+                    mode = "restamp"
+                elif len(relevant) <= cfg["max_changed_files_for_update"]:
+                    mode, changed = "update", relevant
+            except Exception:
+                mode = "full"  # old commit missing (rewritten history, shallow clone)
+
+    if args.dry_run:
+        return name, "dry-run", mode
+
+    if mode == "restamp":
+        manifest = {k: v for k, v in old.items() if k != "_meta"}
+    else:
+        if mode == "update":
+            prompt = build_prompt(cfg, "update.md", OLD_COMMIT=meta["commit"], NEW_COMMIT=head,
+                                  CHANGED_FILES="\n".join(f"- {f}" for f in changed),
+                                  MANIFEST=json.dumps({k: v for k, v in old.items() if k not in ("_meta", "packages")}, indent=2))
+        else:
+            prompt = build_prompt(cfg, "full.md")
+        log = cfg["atlas_dir"] / "logs" / f"{name}.log"
+        try:
+            manifest = run_kiro(cfg, repo, prompt, log)
+        except ValueError:
+            manifest = run_kiro(cfg, repo, prompt, log)  # one retry on unparseable output
+
+    dropped = clean_manifest(manifest, repo)
+    manifest["name"] = name
+    manifest["packages"] = extract_packages(repo)
+    manifest["_meta"] = {
+        "repo_path": str(repo), "commit": head, "generated_at": now().isoformat(timespec="seconds"),
+        "mode": mode, "model": cfg["model"] if mode != "restamp" else meta.get("model"),
+        "last_full_at": now().isoformat(timespec="seconds") if mode == "full" else meta.get("last_full_at"),
+        "dropped_without_evidence": dropped,
+    }
+    write_json(out, manifest)
+    return name, mode, (f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, "
+                        f"{len(dropped)} dropped")
