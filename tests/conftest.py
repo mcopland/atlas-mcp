@@ -1,9 +1,21 @@
 import json
+import os
 import subprocess
 
 import pytest
 
 import atlas
+
+
+@pytest.fixture(autouse=True)
+def isolated_git(monkeypatch):
+    """The fixtures below make throwaway commits with plain messages such as "init". A
+    developer's global git config can reject those (a commit-msg hook, required signing) and
+    fail the suite for reasons that have nothing to do with atlas, so point every git
+    subprocess the tests spawn at an empty config."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
 def _git(repo, *args):
