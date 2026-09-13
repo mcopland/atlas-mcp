@@ -591,6 +591,20 @@ def clean_manifest(m, repo, cfg):
     return dropped, rejected
 
 
+def is_full_due(last_full, full_regen_days):
+    """An unparseable or naive stamp means a full run is due: anything else would raise on
+    every subsequent run and leave the repo permanently erroring."""
+    if not last_full:
+        return True
+    try:
+        stamp = dt.datetime.fromisoformat(last_full)
+    except (TypeError, ValueError):
+        return True
+    if stamp.tzinfo is None:
+        return True
+    return now() - stamp > dt.timedelta(days=full_regen_days)
+
+
 def process_repo(cfg, name, repo, args):
     out = cfg["atlas_dir"] / "repos" / f"{name}.json"
     if args.pull:
@@ -606,10 +620,7 @@ def process_repo(cfg, name, repo, args):
     if old and not args.full:
         if meta.get("commit") == head:
             return name, "skip", "up to date"
-        last_full = meta.get("last_full_at")
-        full_due = not last_full or now() - dt.datetime.fromisoformat(last_full) > dt.timedelta(
-            days=cfg["full_regen_days"]
-        )
+        full_due = is_full_due(meta.get("last_full_at"), cfg["full_regen_days"])
         if not full_due:
             try:
                 changed = git(repo, "diff", "--name-only", meta["commit"], head).splitlines()
@@ -702,13 +713,27 @@ def weaker(a, b):
     return a if RANK[a] >= RANK[b] else b
 
 
+META_FIELDS = ("commit", "generated_at", "repo_path", "mode")
+
+
+def check_meta(m):
+    """Manifests are documented as editable JSON and orphan snapshots get restored by hand,
+    so a hand-edited file must be skipped with a warning rather than taking the whole build
+    down with a KeyError from render_docs or the graph."""
+    meta = m.get("_meta")
+    if not isinstance(meta, dict):
+        raise ValueError("missing _meta")
+    missing = [k for k in META_FIELDS if not meta.get(k)]
+    if missing:
+        raise ValueError(f"incomplete metadata: _meta is missing {', '.join(missing)}")
+
+
 def load_manifests(ad, known):
     manifests, orphans = {}, []
     for p in sorted((ad / "repos").glob("*.json")):
         try:
             m = json.loads(p.read_text(encoding="utf-8"))
-            if not m["_meta"]["commit"]:
-                raise ValueError("empty _meta.commit")
+            check_meta(m)
         except Exception as e:
             print(f"warn: skipping malformed manifest {p.name}: {e}", file=sys.stderr)
             continue
@@ -1088,10 +1113,16 @@ def cmd_status(cfg, _args):
         if not f.exists():
             print(f"  {name}: not generated")
             continue
-        meta = json.loads(f.read_text(encoding="utf-8"))["_meta"]
+        try:
+            manifest = json.loads(f.read_text(encoding="utf-8"))
+            check_meta(manifest)
+        except (OSError, ValueError) as e:
+            print(f"  {name}: unreadable ({e})")
+            continue
+        meta = manifest["_meta"]
         try:
             state = "fresh" if git(path, "rev-parse", "HEAD") == meta["commit"] else "stale"
-        except Exception as e:
+        except (RuntimeError, subprocess.SubprocessError) as e:
             state = f"error: {e}"
         print(f"  {name}: {state} ({meta['commit'][:8]}, {meta['generated_at']}, {meta['mode']})")
     orphans = [p.stem for p in sorted((cfg["atlas_dir"] / "repos").glob("*.json")) if p.stem not in repos]

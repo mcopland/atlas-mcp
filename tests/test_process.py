@@ -276,3 +276,12 @@ def test_timeout_is_logged_and_blamed_on_approval(make_cfg, monkeypatch, tmp_pat
     text = log.read_text(encoding="utf-8")
     assert "TIMEOUT" in text
     assert "partial output" in text
+
+
+def test_a_naive_last_full_at_forces_a_full_run(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+    repo = make_repo("svc", files={"main.go": "package main"})
+    cfg = make_cfg()
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"), last_full_at="2026-01-01T00:00:00")
+    commit(repo, "main.go", "package main // v2")
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "full"

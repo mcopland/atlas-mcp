@@ -278,3 +278,11 @@ def test_status_reports_fresh_entries_and_orphans(make_repo, make_cfg, make_mani
     out = capsys.readouterr().out
     assert "live: fresh" in out
     assert "gone: orphan" in out
+
+
+def test_status_reports_a_manifest_with_incomplete_metadata(make_repo, make_cfg, make_manifest, capsys):
+    make_repo("live")
+    cfg = make_cfg()
+    make_manifest(cfg, "live", _meta={"commit": "a" * 40})
+    atlas.cmd_status(cfg, argparse.Namespace())
+    assert "incomplete metadata" in capsys.readouterr().out

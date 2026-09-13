@@ -366,3 +366,12 @@ def test_an_exact_identifier_still_matches_a_generic_name(make_cfg, make_manifes
     make_manifest(cfg, "api")
     make_manifest(cfg, "client", consumes=[{"kind": "http", "name": "api", "key": "api", "evidence": ev()}])
     assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [("client", "api", "exact")]
+
+
+def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
+    cfg = make_cfg()
+    make_manifest(cfg, "good")
+    make_manifest(cfg, "partial", _meta={"commit": "a" * 40})
+    g = graph_of(cfg, known={"good", "partial"})
+    assert set(g["repos"]) == {"good"}
+    assert "partial" in capsys.readouterr().err
