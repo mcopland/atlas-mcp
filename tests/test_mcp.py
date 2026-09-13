@@ -10,19 +10,38 @@ import atlas_mcp  # noqa: E402
 
 
 def manifest(name, **fields):
-    m = {"name": name, "summary": f"{name} summary", "overview": "", "domain": "unassigned",
-         "kind": "service", "languages": [], "owners": [], "identifiers": [], "exposes": [],
-         "consumes": [], "datastores": [], "components": [], "component_edges": [],
-         "entrypoints": [], "notes": [], "packages": {"publishes": [], "depends_on": []},
-         "_meta": {"commit": "a" * 40, "generated_at": "2026-01-01T00:00:00+00:00",
-                   "repo_path": "/src/" + name, "mode": "full"}}
+    m = {
+        "name": name,
+        "summary": f"{name} summary",
+        "overview": "",
+        "domain": "unassigned",
+        "kind": "service",
+        "languages": [],
+        "owners": [],
+        "identifiers": [],
+        "exposes": [],
+        "consumes": [],
+        "datastores": [],
+        "components": [],
+        "component_edges": [],
+        "entrypoints": [],
+        "notes": [],
+        "packages": {"publishes": [], "depends_on": []},
+        "_meta": {
+            "commit": "a" * 40,
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "repo_path": "/src/" + name,
+            "mode": "full",
+        },
+    }
     m.update(fields)
     return m
 
 
 def _git(path, *args):
-    return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True,
-                          text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    return subprocess.run(
+        ["git", "-C", str(path), *args], check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    ).stdout.strip()
 
 
 def _commit(path, text):
@@ -59,10 +78,16 @@ def atlas_env(tmp_path, monkeypatch):
 
 
 def repo_row(tmp_path, name, domain="payments", kind="service", identifiers=()):
-    return {"summary": f"{name} summary", "domain": domain, "kind": kind,
-            "identifiers": list(identifiers), "commit": "a" * 40,
-            "generated_at": "2026-01-01T00:00:00+00:00", "repo_path": str(tmp_path / name),
-            "doc": str(tmp_path / "docs" / f"{name}.md")}
+    return {
+        "summary": f"{name} summary",
+        "domain": domain,
+        "kind": kind,
+        "identifiers": list(identifiers),
+        "commit": "a" * 40,
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "repo_path": str(tmp_path / name),
+        "doc": str(tmp_path / "docs" / f"{name}.md"),
+    }
 
 
 @pytest.fixture
@@ -75,21 +100,39 @@ def loaded(atlas_env, tmp_path):
             "billing": repo_row(tmp_path, "billing", domain="identity"),
         },
         "edges": [
-            {"from": "web", "to": "orders", "kind": "http", "key": "orders.internal",
-             "name": "orders api", "detail": "", "evidence": "a.go", "match": "exact"},
-            {"from": "orders", "to": "billing", "kind": "topic", "key": "invoice.raised",
-             "name": "invoice", "detail": "", "evidence": "b.go", "match": "alias"},
+            {
+                "from": "web",
+                "to": "orders",
+                "kind": "http",
+                "key": "orders.internal",
+                "name": "orders api",
+                "detail": "",
+                "evidence": "a.go",
+                "match": "exact",
+            },
+            {
+                "from": "orders",
+                "to": "billing",
+                "kind": "topic",
+                "key": "invoice.raised",
+                "name": "invoice",
+                "detail": "",
+                "evidence": "b.go",
+                "match": "alias",
+            },
         ],
-        "unresolved": [{"repo": "web", "kind": "http", "key": "stripe.com",
-                        "name": "stripe", "evidence": "c.go"}],
+        "unresolved": [{"repo": "web", "kind": "http", "key": "stripe.com", "name": "stripe", "evidence": "c.go"}],
         "shared_datastores": [{"name": "orders_db", "repos": {"orders": "owner", "web": "read"}}],
     }
     manifests = {
-        "orders": manifest("orders", identifiers=["orders.internal"],
-                           exposes=[{"kind": "topic", "name": "OrderCreated",
-                                     "key": "order.created", "evidence": "a.go"}]),
-        "web": manifest("web", consumes=[{"kind": "topic", "name": "OrderCreated",
-                                          "key": "order.created", "evidence": "b.go"}]),
+        "orders": manifest(
+            "orders",
+            identifiers=["orders.internal"],
+            exposes=[{"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": "a.go"}],
+        ),
+        "web": manifest(
+            "web", consumes=[{"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": "b.go"}]
+        ),
         "billing": manifest("billing"),
     }
     atlas_env(graph, manifests, {"orders": "# orders\n\nthe orders doc\n"})
@@ -156,10 +199,16 @@ def test_find_path_falls_back_to_undirected(loaded):
 
 
 def test_find_path_reports_no_connection(loaded, atlas_env, tmp_path):
-    atlas_env({"generated_at": "x", "repos": {"a": repo_row(tmp_path, "a"),
-                                              "b": repo_row(tmp_path, "b")},
-               "edges": [], "unresolved": [], "shared_datastores": []},
-              {"a": manifest("a"), "b": manifest("b")})
+    atlas_env(
+        {
+            "generated_at": "x",
+            "repos": {"a": repo_row(tmp_path, "a"), "b": repo_row(tmp_path, "b")},
+            "edges": [],
+            "unresolved": [],
+            "shared_datastores": [],
+        },
+        {"a": manifest("a"), "b": manifest("b")},
+    )
     got = json.loads(atlas_mcp.find_path("a", "b"))
     assert got["hops"] == []
     assert "no connection" in got["message"]
@@ -202,8 +251,10 @@ def test_freshness_reports_fresh_then_stale_after_a_commit(atlas_env, tmp_path):
     row = repo_row(tmp_path, "orders")
     row["repo_path"] = str(repo)
     row["commit"] = head
-    atlas_env({"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [],
-               "shared_datastores": []}, {"orders": manifest("orders")})
+    atlas_env(
+        {"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [], "shared_datastores": []},
+        {"orders": manifest("orders")},
+    )
 
     assert json.loads(atlas_mcp.freshness("orders"))["repos"][0]["status"] == "fresh"
 
@@ -213,15 +264,16 @@ def test_freshness_reports_fresh_then_stale_after_a_commit(atlas_env, tmp_path):
     assert got["commits_behind"] == 1
 
 
-def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_path,
-                                                                 monkeypatch):
+def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_path, monkeypatch):
     repo = tmp_path / "orders"
     heads = _git_repo(repo, commits=2)
     row = repo_row(tmp_path, "orders")
     row["repo_path"] = str(repo)
     row["commit"] = heads[0]
-    atlas_env({"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [],
-               "shared_datastores": []}, {"orders": manifest("orders")})
+    atlas_env(
+        {"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [], "shared_datastores": []},
+        {"orders": manifest("orders")},
+    )
     calls = []
     real = atlas_mcp.subprocess.run
 
@@ -237,11 +289,15 @@ def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_
 
 
 def test_resolve_refuses_to_guess_when_an_identifier_is_claimed_twice(atlas_env, tmp_path):
-    repos = {"svc-a": repo_row(tmp_path, "svc-a", identifiers=["orders"]),
-             "svc-b": repo_row(tmp_path, "svc-b", identifiers=["orders"]),
-             "orders-legacy": repo_row(tmp_path, "orders-legacy")}
-    atlas_env({"generated_at": "x", "repos": repos, "edges": [], "unresolved": [],
-               "shared_datastores": []}, {n: manifest(n) for n in repos})
+    repos = {
+        "svc-a": repo_row(tmp_path, "svc-a", identifiers=["orders"]),
+        "svc-b": repo_row(tmp_path, "svc-b", identifiers=["orders"]),
+        "orders-legacy": repo_row(tmp_path, "orders-legacy"),
+    }
+    atlas_env(
+        {"generated_at": "x", "repos": repos, "edges": [], "unresolved": [], "shared_datastores": []},
+        {n: manifest(n) for n in repos},
+    )
     name, err = atlas_mcp.resolve("orders")
     assert name is None
     assert err["candidates"] == ["svc-a", "svc-b"]
@@ -249,9 +305,16 @@ def test_resolve_refuses_to_guess_when_an_identifier_is_claimed_twice(atlas_env,
 
 def test_store_reloads_when_the_graph_changes(loaded, atlas_env, tmp_path):
     assert json.loads(atlas_mcp.list_repos())["count"] == 3
-    atlas_env({"generated_at": "y", "repos": {"solo": repo_row(tmp_path, "solo")},
-               "edges": [], "unresolved": [], "shared_datastores": []},
-              {"solo": manifest("solo")})
+    atlas_env(
+        {
+            "generated_at": "y",
+            "repos": {"solo": repo_row(tmp_path, "solo")},
+            "edges": [],
+            "unresolved": [],
+            "shared_datastores": [],
+        },
+        {"solo": manifest("solo")},
+    )
     stamp = os.path.getmtime(tmp_path / "graph.json") + 10
     os.utime(tmp_path / "graph.json", (stamp, stamp))
     assert json.loads(atlas_mcp.list_repos())["count"] == 1

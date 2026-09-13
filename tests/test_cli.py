@@ -85,8 +85,7 @@ def test_known_repo_names_refuses_when_discovery_is_empty(make_cfg):
     assert "no repos found" in str(e.value)
 
 
-def test_build_command_leaves_the_graph_intact_when_discovery_is_empty(
-        make_cfg, make_manifest):
+def test_build_command_leaves_the_graph_intact_when_discovery_is_empty(make_cfg, make_manifest):
     cfg = make_cfg(repo_roots=[])
     make_manifest(cfg, "a")
     atlas.write_json(cfg["atlas_dir"] / "graph.json", {"repos": {"a": {}}})
@@ -96,8 +95,7 @@ def test_build_command_leaves_the_graph_intact_when_discovery_is_empty(
     assert kept["repos"] == {"a": {}}
 
 
-def test_prune_reports_orphans_without_moving_them(
-        make_repo, make_cfg, make_manifest, capsys):
+def test_prune_reports_orphans_without_moving_them(make_repo, make_cfg, make_manifest, capsys):
     make_repo("live")
     cfg = make_cfg()
     make_manifest(cfg, "live")
@@ -129,10 +127,16 @@ def test_prune_refuses_when_discovery_is_empty(make_cfg, make_manifest):
 
 def test_unresolved_groups_targets_by_frequency(make_cfg, capsys):
     cfg = make_cfg()
-    atlas.write_json(cfg["atlas_dir"] / "graph.json", {"unresolved": [
-        {"repo": "a", "kind": "http", "key": "stripe.com"},
-        {"repo": "b", "kind": "http", "key": "stripe.com"},
-        {"repo": "c", "kind": "topic", "key": "legacy.events", "candidates": ["x", "y"]}]})
+    atlas.write_json(
+        cfg["atlas_dir"] / "graph.json",
+        {
+            "unresolved": [
+                {"repo": "a", "kind": "http", "key": "stripe.com"},
+                {"repo": "b", "kind": "http", "key": "stripe.com"},
+                {"repo": "c", "kind": "topic", "key": "legacy.events", "candidates": ["x", "y"]},
+            ]
+        },
+    )
     atlas.cmd_unresolved(cfg, argparse.Namespace(top=10))
     printed = capsys.readouterr().out
     assert "stripe.com" in printed
@@ -155,15 +159,30 @@ def test_repo_map_warns_when_a_path_changes_name(make_cfg, capsys, tmp_path):
 
 
 def _gen_args(**overrides):
-    args = {"only": None, "limit": None, "full": False, "pull": False, "dry_run": False,
-            "no_build": False, "force_unlock": False}
+    args = {
+        "only": None,
+        "limit": None,
+        "full": False,
+        "pull": False,
+        "dry_run": False,
+        "no_build": False,
+        "force_unlock": False,
+    }
     args.update(overrides)
     return argparse.Namespace(**args)
 
 
 def _stub_manifest(*_a, **_k):
-    return {"summary": "s", "overview": "o", "domain": "unassigned", "kind": "service",
-            "identifiers": [], "exposes": [], "consumes": [], "datastores": []}
+    return {
+        "summary": "s",
+        "overview": "o",
+        "domain": "unassigned",
+        "kind": "service",
+        "identifiers": [],
+        "exposes": [],
+        "consumes": [],
+        "datastores": [],
+    }
 
 
 def test_generate_writes_the_map_the_graph_and_the_docs(make_repo, make_cfg, monkeypatch):
@@ -181,8 +200,7 @@ def test_generate_writes_the_map_the_graph_and_the_docs(make_repo, make_cfg, mon
     assert (ad / "index.md").exists()
 
 
-def test_generate_reports_a_failed_repo_and_keeps_the_others(make_repo, make_cfg,
-                                                             monkeypatch, capsys):
+def test_generate_reports_a_failed_repo_and_keeps_the_others(make_repo, make_cfg, monkeypatch, capsys):
     make_repo("good")
     make_repo("bad")
     cfg = make_cfg()

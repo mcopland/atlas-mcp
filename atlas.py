@@ -21,6 +21,7 @@ Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
   index.md            one line per repo
   logs/<name>.log     Kiro output, one section per attempt
 """
+
 import argparse
 import concurrent.futures as cf
 import contextlib
@@ -45,22 +46,69 @@ KIT = Path(__file__).resolve().parent
 START, END = "<<<ATLAS_JSON", "ATLAS_JSON>>>"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "venv", "__pycache__", "site-packages"}
-FAMILY = {"http": "svc", "grpc": "svc", "graphql": "svc", "websocket": "svc",
-          "topic": "msg", "queue": "msg", "event": "msg", "package": "pkg", "database": "db"}
-GENERIC_STORES = {"db", "database", "postgres", "postgresql", "mysql", "redis", "cache", "s3", "dynamodb", "main", "default"}
-GENERIC_IDENTIFIERS = {"api", "app", "web", "db", "service", "services", "server", "backend",
-                       "frontend", "core", "common", "shared", "utils", "util", "lib", "libs",
-                       "client", "gateway", "internal", "main", "default", "www", "localhost"}
+FAMILY = {
+    "http": "svc",
+    "grpc": "svc",
+    "graphql": "svc",
+    "websocket": "svc",
+    "topic": "msg",
+    "queue": "msg",
+    "event": "msg",
+    "package": "pkg",
+    "database": "db",
+}
+GENERIC_STORES = {
+    "db",
+    "database",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "redis",
+    "cache",
+    "s3",
+    "dynamodb",
+    "main",
+    "default",
+}
+GENERIC_IDENTIFIERS = {
+    "api",
+    "app",
+    "web",
+    "db",
+    "service",
+    "services",
+    "server",
+    "backend",
+    "frontend",
+    "core",
+    "common",
+    "shared",
+    "utils",
+    "util",
+    "lib",
+    "libs",
+    "client",
+    "gateway",
+    "internal",
+    "main",
+    "default",
+    "www",
+    "localhost",
+}
 ENV_SUFFIX = re.compile(r"_(?:BASE_URL|URL|URI|HOSTNAME|HOST|ENDPOINT|ADDRESS|ADDR|PORT)$")
 RANK = {"exact": 0, "alias": 1, "envvar": 2}
-GRADLE_DEP = re.compile(r"""\b(?:implementation|api|compile|compileOnly|runtimeOnly
+GRADLE_DEP = re.compile(
+    r"""\b(?:implementation|api|compile|compileOnly|runtimeOnly
                         |testImplementation|testCompileOnly|annotationProcessor|kapt)
-                        \b[\s(]+['"]([^'":\s]+):([^'":\s]+)""", re.X)
+                        \b[\s(]+['"]([^'":\s]+):([^'":\s]+)""",
+    re.X,
+)
 MAX_PROMPT_BYTES = 96 * 1024
 TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 
 
 # ---------- helpers ----------
+
 
 def now():
     return dt.datetime.now(dt.timezone.utc)
@@ -78,12 +126,24 @@ def load_config(path):
     except json.JSONDecodeError as e:
         sys.exit(f"invalid JSON in {path}: {e}")
     cfg["atlas_dir"] = expand(cfg.get("atlas_dir", "~/atlas"))
-    defaults = {"repo_roots": [], "repos": [], "exclude_repos": [], "repo_names": {},
-                "kiro_bin": "kiro-cli", "model": "claude-haiku-4.5", "kiro_extra_args": [],
-                "kiro_agent": "atlas-mapper",
-                "parallel": 3, "timeout_minutes": 20, "full_regen_days": 30,
-                "max_changed_files_for_update": 150, "max_ambiguous_hits": 3,
-                "domains": [], "ignore_changes": [], "generic_identifiers": []}
+    defaults = {
+        "repo_roots": [],
+        "repos": [],
+        "exclude_repos": [],
+        "repo_names": {},
+        "kiro_bin": "kiro-cli",
+        "model": "claude-haiku-4.5",
+        "kiro_extra_args": [],
+        "kiro_agent": "atlas-mapper",
+        "parallel": 3,
+        "timeout_minutes": 20,
+        "full_regen_days": 30,
+        "max_changed_files_for_update": 150,
+        "max_ambiguous_hits": 3,
+        "domains": [],
+        "ignore_changes": [],
+        "generic_identifiers": [],
+    }
     for k, v in defaults.items():
         cfg.setdefault(k, v)
     cfg["generic_identifiers"] = {str(s).strip().lower() for s in cfg["generic_identifiers"]} | GENERIC_IDENTIFIERS
@@ -92,8 +152,9 @@ def load_config(path):
 
 
 def git(repo, *args, timeout=60):
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
-                       stdin=subprocess.DEVNULL, timeout=timeout)
+    r = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout
+    )
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
     return r.stdout.strip()
@@ -145,8 +206,10 @@ def atlas_lock(atlas_dir, force=False):
         holder = ""
         with contextlib.suppress(OSError):
             holder = path.read_text(encoding="utf-8").strip()
-        sys.exit(f"another atlas run holds {path} ({holder or 'unknown holder'}); "
-                 f"if that process is dead, rerun with --force-unlock")
+        sys.exit(
+            f"another atlas run holds {path} ({holder or 'unknown holder'}); "
+            f"if that process is dead, rerun with --force-unlock"
+        )
     try:
         os.write(fd, stamp.encode())
     finally:
@@ -204,8 +267,10 @@ def discover_repos(cfg):
 def known_repo_names(cfg):
     repos = discover_repos(cfg)
     if not repos:
-        sys.exit("no repos found; check repo_roots / repos in config. Refusing to rebuild or "
-                 "prune the atlas from an empty discovery (an unmounted root would wipe it).")
+        sys.exit(
+            "no repos found; check repo_roots / repos in config. Refusing to rebuild or "
+            "prune the atlas from an empty discovery (an unmounted root would wipe it)."
+        )
     return set(repos)
 
 
@@ -220,18 +285,22 @@ def save_repo_map(cfg, repos):
     for name, p in new.items():
         prev = was.get(p)
         if prev and prev != name:
-            print(f"warn: {p} renamed {prev} -> {name}; repos/{prev}.json is now an orphan "
-                  f"(run atlas.py prune)", file=sys.stderr)
+            print(
+                f"warn: {p} renamed {prev} -> {name}; repos/{prev}.json is now an orphan (run atlas.py prune)",
+                file=sys.stderr,
+            )
     write_json(path, new)
 
 
 # ---------- deterministic package facts ----------
 
+
 def walk(repo, filenames, max_depth=4):
     for dirpath, dirnames, files in os.walk(repo):
         depth = len(Path(dirpath).relative_to(repo).parts)
-        dirnames[:] = [] if depth >= max_depth else [
-            d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = (
+            [] if depth >= max_depth else [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        )
         for f in files:
             if f in filenames or any(fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat):
                 yield Path(dirpath) / f
@@ -270,8 +339,17 @@ def extract_packages(repo):
         if name:
             depends.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
 
-    wanted = {"package.json", "go.mod", "pyproject.toml", "requirements*.txt", "pom.xml",
-              "build.gradle", "build.gradle.kts", "Cargo.toml", "*.csproj"}
+    wanted = {
+        "package.json",
+        "go.mod",
+        "pyproject.toml",
+        "requirements*.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "Cargo.toml",
+        "*.csproj",
+    }
     for f in walk(repo, wanted):
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
@@ -279,7 +357,7 @@ def extract_packages(repo):
                 data = json.loads(text)
                 pub("npm", data.get("name"), f)
                 for section in ("dependencies", "devDependencies", "peerDependencies"):
-                    for n in (data.get(section) or {}):
+                    for n in data.get(section) or {}:
                         dep("npm", n, f)
             elif f.name == "go.mod":
                 m = re.search(r"^module\s+(\S+)", text, re.M)
@@ -298,7 +376,7 @@ def extract_packages(repo):
                 for spec in project.get("dependencies") or []:
                     m = re.match(r"[A-Za-z0-9_.\-]+", spec)
                     dep("pypi", m and m.group(0), f)
-                for n in (poetry.get("dependencies") or {}):
+                for n in poetry.get("dependencies") or {}:
                     if n.lower() != "python":
                         dep("pypi", n, f)
             elif f.name.startswith("requirements"):
@@ -309,13 +387,11 @@ def extract_packages(repo):
             elif f.name == "pom.xml":
                 root = ET.fromstring(text)
                 parent = next((c for c in root if local(c) == "parent"), None)
-                group = child_text(root, "groupId") or (
-                    child_text(parent, "groupId") if parent is not None else "")
+                group = child_text(root, "groupId") or (child_text(parent, "groupId") if parent is not None else "")
                 pub("maven", coord(group, child_text(root, "artifactId")), f)
                 for node in root.iter():
                     if local(node) == "dependency":
-                        dep("maven", coord(child_text(node, "groupId"),
-                                           child_text(node, "artifactId")), f)
+                        dep("maven", coord(child_text(node, "groupId"), child_text(node, "artifactId")), f)
             elif f.name.startswith("build.gradle"):
                 for m in re.finditer(GRADLE_DEP, text):
                     dep("maven", coord(m.group(1), m.group(2)), f)
@@ -324,8 +400,10 @@ def extract_packages(repo):
                 for settings in ("settings.gradle", "settings.gradle.kts"):
                     path = f.parent / settings
                     if path.exists():
-                        m = re.search(r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""",
-                                      path.read_text(encoding="utf-8", errors="replace"))
+                        m = re.search(
+                            r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""",
+                            path.read_text(encoding="utf-8", errors="replace"),
+                        )
                         root_name = m.group(1) if m else ""
                         break
                 if group and root_name:
@@ -336,9 +414,9 @@ def extract_packages(repo):
                 pub("cargo", name if isinstance(name, str) else None, f)
                 sections = ("dependencies", "dev-dependencies", "build-dependencies")
                 for section in sections:
-                    for n in (data.get(section) or {}):
+                    for n in data.get(section) or {}:
                         dep("cargo", n, f)
-                for n in ((data.get("workspace") or {}).get("dependencies") or {}):
+                for n in (data.get("workspace") or {}).get("dependencies") or {}:
                     dep("cargo", n, f)
             elif f.name.endswith(".csproj"):
                 root = ET.fromstring(text)
@@ -364,11 +442,14 @@ def extract_packages(repo):
 
 # ---------- LLM extraction ----------
 
+
 def build_prompt(cfg, template, **values):
     text = (KIT / "prompts" / template).read_text(encoding="utf-8")
     values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text(encoding="utf-8"))
-    values.setdefault("DOMAINS", ", ".join(cfg["domains"] + ["unassigned"]) if cfg["domains"]
-                      else "a short lowercase name of your choice")
+    values.setdefault(
+        "DOMAINS",
+        ", ".join(cfg["domains"] + ["unassigned"]) if cfg["domains"] else "a short lowercase name of your choice",
+    )
     for k, v in values.items():
         text = text.replace("{{" + k + "}}", v)
     return text
@@ -409,7 +490,7 @@ def parse_output(text):
         if s < 0:
             continue
         e = candidate.find(END, s)
-        body = candidate[s + len(START): e if e >= 0 else None].strip()
+        body = candidate[s + len(START) : e if e >= 0 else None].strip()
         body = re.sub(r"^```(?:json)?\s*|\s*```$", "", body)
         try:
             data = json.loads(body)
@@ -429,19 +510,44 @@ def log_append(log_path, text):
 
 def run_kiro(cfg, repo, prompt, log_path):
     agent = ["--agent", cfg["kiro_agent"]] if cfg["kiro_agent"] else []
-    cmd = [cfg["kiro_bin"], "chat", "--no-interactive", "--wrap", "never",
-           "--model", cfg["model"], *agent, *cfg["kiro_extra_args"], prompt]
-    header = (f"=== attempt {now().isoformat(timespec='seconds')} ===\n"
-              f"$ {' '.join(cmd[:-1])} <prompt {len(prompt)} chars>\n")
+    cmd = [
+        cfg["kiro_bin"],
+        "chat",
+        "--no-interactive",
+        "--wrap",
+        "never",
+        "--model",
+        cfg["model"],
+        *agent,
+        *cfg["kiro_extra_args"],
+        prompt,
+    ]
+    header = (
+        f"=== attempt {now().isoformat(timespec='seconds')} ===\n$ {' '.join(cmd[:-1])} <prompt {len(prompt)} chars>\n"
+    )
     try:
-        r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                           timeout=cfg["timeout_minutes"] * 60, env={**os.environ, "NO_COLOR": "1"})
+        r = subprocess.run(
+            cmd,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=cfg["timeout_minutes"] * 60,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
     except subprocess.TimeoutExpired as e:
         partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         log_append(log_path, header + "TIMEOUT\n" + ANSI.sub("", partial) + "\n")
         raise RuntimeError("timed out; usually a tool call waiting for approval (see README)")
-    log_append(log_path, header + f"exit={r.returncode}\n\n" + ANSI.sub("", r.stdout or "")
-               + "\n--- stderr ---\n" + ANSI.sub("", r.stderr or "") + "\n")
+    log_append(
+        log_path,
+        header
+        + f"exit={r.returncode}\n\n"
+        + ANSI.sub("", r.stdout or "")
+        + "\n--- stderr ---\n"
+        + ANSI.sub("", r.stderr or "")
+        + "\n",
+    )
     if r.returncode != 0:
         raise RuntimeError(f"kiro-cli exited {r.returncode}; see {log_path}")
     return parse_output(ANSI.sub("", r.stdout or ""))
@@ -470,8 +576,7 @@ def clean_manifest(m, repo, cfg):
         m[field] = kept
     for field in ("languages", "owners", "identifiers", "entrypoints", "notes"):
         items = m.get(field)
-        m[field] = ([str(i) for i in items if not isinstance(i, (dict, list))]
-                    if isinstance(items, list) else [])
+        m[field] = [str(i) for i in items if not isinstance(i, (dict, list))] if isinstance(items, list) else []
     for field in ("components", "component_edges"):
         items = m.get(field)
         m[field] = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
@@ -502,7 +607,9 @@ def process_repo(cfg, name, repo, args):
         if meta.get("commit") == head:
             return name, "skip", "up to date"
         last_full = meta.get("last_full_at")
-        full_due = not last_full or now() - dt.datetime.fromisoformat(last_full) > dt.timedelta(days=cfg["full_regen_days"])
+        full_due = not last_full or now() - dt.datetime.fromisoformat(last_full) > dt.timedelta(
+            days=cfg["full_regen_days"]
+        )
         if not full_due:
             try:
                 changed = git(repo, "diff", "--name-only", meta["commit"], head).splitlines()
@@ -522,13 +629,16 @@ def process_repo(cfg, name, repo, args):
     else:
         prompt = None
         if mode == "update":
-            prompt = build_prompt(cfg, "update.md", OLD_COMMIT=meta["commit"], NEW_COMMIT=head,
-                                  CHANGED_FILES="\n".join(f"- {f}" for f in changed),
-                                  MANIFEST=json.dumps({k: v for k, v in old.items()
-                                                       if k not in ("_meta", "packages")}, indent=2))
+            prompt = build_prompt(
+                cfg,
+                "update.md",
+                OLD_COMMIT=meta["commit"],
+                NEW_COMMIT=head,
+                CHANGED_FILES="\n".join(f"- {f}" for f in changed),
+                MANIFEST=json.dumps({k: v for k, v in old.items() if k not in ("_meta", "packages")}, indent=2),
+            )
             if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-                print(f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full",
-                      file=sys.stderr)
+                print(f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full", file=sys.stderr)
                 mode, changed, prompt = "full", [], None
         if prompt is None:
             prompt = build_prompt(cfg, "full.md")
@@ -542,17 +652,25 @@ def process_repo(cfg, name, repo, args):
     manifest["name"] = name
     manifest["packages"] = extract_packages(repo)
     manifest["_meta"] = {
-        "repo_path": str(repo), "commit": head, "generated_at": now().isoformat(timespec="seconds"),
-        "mode": mode, "model": cfg["model"] if mode != "restamp" else meta.get("model"),
+        "repo_path": str(repo),
+        "commit": head,
+        "generated_at": now().isoformat(timespec="seconds"),
+        "mode": mode,
+        "model": cfg["model"] if mode != "restamp" else meta.get("model"),
         "last_full_at": now().isoformat(timespec="seconds") if mode == "full" else meta.get("last_full_at"),
-        "dropped_without_evidence": dropped, "domain_rejected": rejected,
+        "dropped_without_evidence": dropped,
+        "domain_rejected": rejected,
     }
     write_json(out, manifest)
-    return name, mode, (f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, "
-                        f"{len(dropped)} dropped")
+    return (
+        name,
+        mode,
+        (f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, {len(dropped)} dropped"),
+    )
 
 
 # ---------- graph ----------
+
 
 def svc_forms(raw):
     s = str(raw).strip().lower()
@@ -600,8 +718,10 @@ def load_manifests(ad, known):
             orphans.append(p.stem)
     if orphans:
         shown = ", ".join(sorted(orphans)[:10]) + (" ..." if len(orphans) > 10 else "")
-        print(f"warn: {len(orphans)} orphan manifests excluded from the graph ({shown}); "
-              f"run atlas.py prune", file=sys.stderr)
+        print(
+            f"warn: {len(orphans)} orphan manifests excluded from the graph ({shown}); run atlas.py prune",
+            file=sys.stderr,
+        )
     return manifests
 
 
@@ -666,8 +786,13 @@ def build(cfg, known):
         weakest = max((RANK[v] for v in hits.values()), default=0)
         fan_in = FAMILY.get(kind) == "msg" and weakest == 0  # one topic, many producers
         if not hits or (not fan_in and len(hits) > cfg["max_ambiguous_hits"]):
-            row = {"repo": src, "kind": kind, "key": key, "name": item.get("name", key),
-                   "evidence": item.get("evidence")}
+            row = {
+                "repo": src,
+                "kind": kind,
+                "key": key,
+                "name": item.get("name", key),
+                "evidence": item.get("evidence"),
+            }
             if hits:  # too many weak matches to pick from; hand the agent the shortlist
                 row["candidates"] = sorted(hits)
             unresolved.append(row)
@@ -677,9 +802,18 @@ def build(cfg, known):
             if sig in seen:
                 continue
             seen.add(sig)
-            edges.append({"from": src, "to": dst, "kind": kind, "key": key, "name": item.get("name", key),
-                          "detail": item.get("detail", ""), "evidence": item.get("evidence"),
-                          "match": "ambiguous" if len(hits) > 1 else strength})
+            edges.append(
+                {
+                    "from": src,
+                    "to": dst,
+                    "kind": kind,
+                    "key": key,
+                    "name": item.get("name", key),
+                    "detail": item.get("detail", ""),
+                    "evidence": item.get("evidence"),
+                    "match": "ambiguous" if len(hits) > 1 else strength,
+                }
+            )
 
     for name, m in manifests.items():
         for item in m.get("consumes") or []:
@@ -699,8 +833,13 @@ def build(cfg, known):
         for p in (m.get("packages") or {}).get("depends_on", []):
             eco_key, bare = f"{p['ecosystem']}:{p['name']}".lower(), p["name"].lower()
             if ("pkg", eco_key) in index or ("pkg", bare) in index:  # only internal packages
-                link(name, {"name": p["name"], "evidence": p["evidence"], "detail": "declared dependency"},
-                     "package", p["name"], [("pkg", eco_key, "exact"), ("pkg", bare, "alias")])
+                link(
+                    name,
+                    {"name": p["name"], "evidence": p["evidence"], "detail": "declared dependency"},
+                    "package",
+                    p["name"],
+                    [("pkg", eco_key, "exact"), ("pkg", bare, "alias")],
+                )
 
     stores = {}
     for name, m in manifests.items():
@@ -712,20 +851,33 @@ def build(cfg, known):
 
     graph = {
         "generated_at": now().isoformat(timespec="seconds"),
-        "repos": {n: {"summary": m.get("summary", ""), "domain": m.get("domain", "unassigned"),
-                      "kind": m.get("kind", ""), "identifiers": m.get("identifiers", []),
-                      "commit": m["_meta"]["commit"], "generated_at": m["_meta"]["generated_at"],
-                      "repo_path": m["_meta"]["repo_path"], "doc": str(ad / "docs" / f"{n}.md")}
-                  for n, m in manifests.items()},
-        "edges": edges, "unresolved": unresolved, "shared_datastores": shared,
+        "repos": {
+            n: {
+                "summary": m.get("summary", ""),
+                "domain": m.get("domain", "unassigned"),
+                "kind": m.get("kind", ""),
+                "identifiers": m.get("identifiers", []),
+                "commit": m["_meta"]["commit"],
+                "generated_at": m["_meta"]["generated_at"],
+                "repo_path": m["_meta"]["repo_path"],
+                "doc": str(ad / "docs" / f"{n}.md"),
+            }
+            for n, m in manifests.items()
+        },
+        "edges": edges,
+        "unresolved": unresolved,
+        "shared_datastores": shared,
     }
     render_docs(ad, manifests, graph)
     write_json(ad / "graph.json", graph)  # published last: docs it points at already exist
-    print(f"graph: {len(manifests)} repos, {len(edges)} edges, {len(unresolved)} unresolved, "
-          f"{len(shared)} shared datastores -> {ad / 'graph.json'}")
+    print(
+        f"graph: {len(manifests)} repos, {len(edges)} edges, {len(unresolved)} unresolved, "
+        f"{len(shared)} shared datastores -> {ad / 'graph.json'}"
+    )
 
 
 # ---------- docs ----------
+
 
 def mid(s):
     return "n_" + re.sub(r"\W", "_", str(s))
@@ -745,31 +897,53 @@ def render_docs(ad, manifests, graph):
         meta = m["_meta"]
         out_edges = [e for e in graph["edges"] if e["from"] == name]
         in_edges = [e for e in graph["edges"] if e["to"] == name]
-        lines = [f"# {name}", "", m.get("summary", ""), "",
-                 f"- Domain: {m.get('domain')} | Kind: {m.get('kind')} | Languages: {', '.join(m.get('languages', []))}",
-                 f"- Owners: {', '.join(m.get('owners', [])) or 'unknown'}",
-                 f"- Commit: `{meta['commit'][:12]}` generated {meta['generated_at']} ({meta['mode']})",
-                 f"- Path: {meta['repo_path']}", "", "## Overview", "", m.get("overview", ""), "", "## Exposes", ""]
-        lines += [f"- {e.get('kind')} `{e.get('name')}` key `{e.get('key')}`: {e.get('detail', '')} ({e.get('evidence')})"
-                  for e in m.get("exposes", [])] or ["- none found"]
+        lines = [
+            f"# {name}",
+            "",
+            m.get("summary", ""),
+            "",
+            f"- Domain: {m.get('domain')} | Kind: {m.get('kind')} | Languages: {', '.join(m.get('languages', []))}",
+            f"- Owners: {', '.join(m.get('owners', [])) or 'unknown'}",
+            f"- Commit: `{meta['commit'][:12]}` generated {meta['generated_at']} ({meta['mode']})",
+            f"- Path: {meta['repo_path']}",
+            "",
+            "## Overview",
+            "",
+            m.get("overview", ""),
+            "",
+            "## Exposes",
+            "",
+        ]
+        lines += [
+            f"- {e.get('kind')} `{e.get('name')}` key `{e.get('key')}`: {e.get('detail', '')} ({e.get('evidence')})"
+            for e in m.get("exposes", [])
+        ] or ["- none found"]
         lines += ["", "## Consumes", ""]
         for c in m.get("consumes", []):
             targets = [e["to"] for e in out_edges if e["key"] == c.get("key")]
-            lines.append(f"- {c.get('kind')} `{c.get('name')}` key `{c.get('key')}` -> "
-                         f"{', '.join(targets) or 'unresolved'}: {c.get('detail', '')} ({c.get('evidence')})")
+            lines.append(
+                f"- {c.get('kind')} `{c.get('name')}` key `{c.get('key')}` -> "
+                f"{', '.join(targets) or 'unresolved'}: {c.get('detail', '')} ({c.get('evidence')})"
+            )
         lines += [] if m.get("consumes") else ["- none found"]
         lines += ["", "## Used by", ""]
-        lines += [f"- {e['from']} via {e['kind']} `{e['key']}` ({e['match']})" for e in in_edges] or ["- no known dependents"]
+        lines += [f"- {e['from']} via {e['kind']} `{e['key']}` ({e['match']})" for e in in_edges] or [
+            "- no known dependents"
+        ]
         lines += ["", "## Datastores", ""]
-        lines += [f"- {d.get('kind')} `{d.get('name')}` ({d.get('access')}) ({d.get('evidence')})"
-                  for d in m.get("datastores", [])] or ["- none found"]
+        lines += [
+            f"- {d.get('kind')} `{d.get('name')}` ({d.get('access')}) ({d.get('evidence')})"
+            for d in m.get("datastores", [])
+        ] or ["- none found"]
         if m.get("components"):
             lines += ["", "## Components", ""]
             lines += [f"- {c.get('name')} `{c.get('path')}`: {c.get('role')}" for c in m["components"]]
             lines += ["", "```mermaid", "flowchart LR"]
             lines += [f'  {mid(c.get("name"))}["{mtext(c.get("name"))}"]' for c in m["components"]]
-            lines += [f'  {mid(e.get("from"))} -->|{mtext(e.get("label", ""))}| {mid(e.get("to"))}'
-                      for e in m.get("component_edges", [])]
+            lines += [
+                f"  {mid(e.get('from'))} -->|{mtext(e.get('label', ''))}| {mid(e.get('to'))}"
+                for e in m.get("component_edges", [])
+            ]
             lines += ["```"]
         if m.get("notes"):
             lines += ["", "## Notes", ""] + [f"- {n}" for n in m["notes"]]
@@ -785,13 +959,22 @@ def render_docs(ad, manifests, graph):
             if e["from"] in members_set or e["to"] in members_set:
                 pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
         outsiders = {n for pair in pairs for n in pair} - members_set
-        lines = [f"# Domain: {domain}", "", "```mermaid", "flowchart LR", f'  subgraph {mid("d_" + domain)}["{mtext(domain)}"]']
+        lines = [
+            f"# Domain: {domain}",
+            "",
+            "```mermaid",
+            "flowchart LR",
+            f'  subgraph {mid("d_" + domain)}["{mtext(domain)}"]',
+        ]
         lines += [f'    {mid(n)}["{mtext(n)}"]' for n in sorted(members)]
-        lines += ["  end"] + [f'  {mid(n)}["{mtext(n)} ({mtext(graph["repos"][n]["domain"])})"]' for n in sorted(outsiders)]
+        lines += ["  end"] + [
+            f'  {mid(n)}["{mtext(n)} ({mtext(graph["repos"][n]["domain"])})"]' for n in sorted(outsiders)
+        ]
         lines += [f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid(b)}" for (a, b), k in sorted(pairs.items())]
         lines += ["```", ""] + [f"- {n}: {graph['repos'][n]['summary']}" for n in sorted(members)]
         (staging / "domains" / f"{re.sub(r'[^a-z0-9_-]', '_', domain)}.md").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8")
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
 
     live, retired = ad / "docs", ad / "docs.old"
     if retired.exists():
@@ -804,12 +987,16 @@ def render_docs(ad, manifests, graph):
 
     index = ["# Org atlas", "", f"Generated {graph['generated_at']}. {len(manifests)} repos.", ""]
     for domain, members in sorted(by_domain.items()):
-        index += [f"## {domain}", ""] + [
-            f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}" for n in sorted(members)] + [""]
+        index += (
+            [f"## {domain}", ""]
+            + [f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}" for n in sorted(members)]
+            + [""]
+        )
     write_text(ad / "index.md", "\n".join(index) + "\n")
 
 
 # ---------- commands ----------
+
 
 def cmd_generate(cfg, args):
     repos = discover_repos(cfg)
@@ -866,8 +1053,10 @@ def cmd_prune(cfg, args):
                 target = dest / f"{p.stem}.{now().strftime('%Y%m%dT%H%M%S')}.json"
             p.replace(target)
         print(f"  {p.stem}: {'moved aside' if args.apply else 'orphan'}")
-    print(f"{len(orphans)} orphans " + (f"moved to {dest}" if args.apply
-                                        else f"found; rerun with --apply to move them to {dest}"))
+    print(
+        f"{len(orphans)} orphans "
+        + (f"moved to {dest}" if args.apply else f"found; rerun with --apply to move them to {dest}")
+    )
 
 
 def cmd_unresolved(cfg, args):
@@ -890,8 +1079,10 @@ def cmd_unresolved(cfg, args):
 def cmd_status(cfg, _args):
     repos = discover_repos(cfg)
     if not repos:
-        sys.exit("no repos found; check repo_roots / repos in config. Refusing to report every "
-                 "manifest as an orphan from an empty discovery.")
+        sys.exit(
+            "no repos found; check repo_roots / repos in config. Refusing to report every "
+            "manifest as an orphan from an empty discovery."
+        )
     for name, path in sorted(repos.items()):
         f = cfg["atlas_dir"] / "repos" / f"{name}.json"
         if not f.exists():
@@ -919,8 +1110,9 @@ def main():
     g.add_argument("--pull", action="store_true", help="git pull --ff-only each repo first")
     g.add_argument("--dry-run", action="store_true", help="show what would run, spend nothing")
     g.add_argument("--no-build", action="store_true")
-    g.add_argument("--force-unlock", action="store_true",
-                   help="clear a stale lock file (not needed where flock is available)")
+    g.add_argument(
+        "--force-unlock", action="store_true", help="clear a stale lock file (not needed where flock is available)"
+    )
     sub.add_parser("build")
     p = sub.add_parser("prune")
     p.add_argument("--apply", action="store_true", help="move orphan manifests to repos/_orphans")
@@ -929,8 +1121,13 @@ def main():
     sub.add_parser("status")
     args = ap.parse_args()
     cfg = load_config(args.config)
-    {"generate": cmd_generate, "build": cmd_build, "prune": cmd_prune,
-     "unresolved": cmd_unresolved, "status": cmd_status}[args.cmd](cfg, args)
+    {
+        "generate": cmd_generate,
+        "build": cmd_build,
+        "prune": cmd_prune,
+        "unresolved": cmd_unresolved,
+        "status": cmd_status,
+    }[args.cmd](cfg, args)
 
 
 if __name__ == "__main__":

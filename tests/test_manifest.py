@@ -33,9 +33,14 @@ def test_evidence_ok_rejects_symlink_escaping_the_repo(tmp_path):
 
 def test_clean_manifest_drops_items_without_valid_evidence(tmp_path, make_cfg):
     (tmp_path / "ok.go").write_text("x")
-    m = {"exposes": [{"kind": "http", "key": "a", "evidence": "ok.go"},
-                     {"kind": "http", "key": "b", "evidence": "ghost.go"}],
-         "consumes": ["not-a-dict"], "datastores": []}
+    m = {
+        "exposes": [
+            {"kind": "http", "key": "a", "evidence": "ok.go"},
+            {"kind": "http", "key": "b", "evidence": "ghost.go"},
+        ],
+        "consumes": ["not-a-dict"],
+        "datastores": [],
+    }
     dropped, rejected = atlas.clean_manifest(m, tmp_path, make_cfg())
     assert [e["key"] for e in m["exposes"]] == ["a"]
     assert m["consumes"] == []
@@ -76,8 +81,7 @@ def test_clean_manifest_lowercases_repo_and_item_kinds(tmp_path, make_cfg):
 
 
 def test_clean_manifest_drops_structured_entries_from_scalar_lists(tmp_path, make_cfg):
-    m = {"identifiers": ["orders", {"name": "orders"}, 7],
-         "components": [{"name": "api"}, "not-a-component"]}
+    m = {"identifiers": ["orders", {"name": "orders"}, 7], "components": [{"name": "api"}, "not-a-component"]}
     atlas.clean_manifest(m, tmp_path, make_cfg())
     assert m["identifiers"] == ["orders", "7"]
     assert m["components"] == [{"name": "api"}]

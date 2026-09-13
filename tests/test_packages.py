@@ -12,13 +12,17 @@ def write(tmp_path, files):
 
 
 def test_extract_packages_reads_every_ecosystem(tmp_path):
-    write(tmp_path, {
-        "package.json": json.dumps({"name": "@org/web", "dependencies": {"react": "^18"},
-                                    "devDependencies": {"jest": "^29"}}),
-        "svc/go.mod": "module github.com/org/svc\n\nrequire (\n\tgithub.com/org/lib v1.2.3 // c\n)\n",
-        "lib/pyproject.toml": '[project]\nname = "Org_Lib"\ndependencies = ["requests>=2", "boto3"]\n',
-        "requirements.txt": "# comment\n-e .\nDjango==5.0\n",
-    })
+    write(
+        tmp_path,
+        {
+            "package.json": json.dumps(
+                {"name": "@org/web", "dependencies": {"react": "^18"}, "devDependencies": {"jest": "^29"}}
+            ),
+            "svc/go.mod": "module github.com/org/svc\n\nrequire (\n\tgithub.com/org/lib v1.2.3 // c\n)\n",
+            "lib/pyproject.toml": '[project]\nname = "Org_Lib"\ndependencies = ["requests>=2", "boto3"]\n',
+            "requirements.txt": "# comment\n-e .\nDjango==5.0\n",
+        },
+    )
     got = atlas.extract_packages(tmp_path)
     pub = {(p["ecosystem"], p["name"]) for p in got["publishes"]}
     dep = {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
@@ -30,10 +34,13 @@ def test_extract_packages_reads_every_ecosystem(tmp_path):
 
 
 def test_extract_packages_drops_monorepo_internal_dependencies(tmp_path):
-    write(tmp_path, {
-        "a/package.json": json.dumps({"name": "@org/a", "dependencies": {"@org/b": "*"}}),
-        "b/package.json": json.dumps({"name": "@org/b"}),
-    })
+    write(
+        tmp_path,
+        {
+            "a/package.json": json.dumps({"name": "@org/a", "dependencies": {"@org/b": "*"}}),
+            "b/package.json": json.dumps({"name": "@org/b"}),
+        },
+    )
     got = atlas.extract_packages(tmp_path)
     assert {(d["ecosystem"], d["name"]) for d in got["depends_on"]} == set()
 
@@ -81,13 +88,16 @@ CSPROJ = """<Project>
 
 
 def test_extract_packages_reads_maven_gradle_cargo_and_nuget(tmp_path):
-    write(tmp_path, {
-        "svc/pom.xml": POM,
-        "app/settings.gradle": "rootProject.name = 'web'\n",
-        "app/build.gradle": GRADLE,
-        "rs/Cargo.toml": '[package]\nname = "orders-rs"\n\n[dependencies]\nserde = "1"\n',
-        "dotnet/Orders.csproj": CSPROJ,
-    })
+    write(
+        tmp_path,
+        {
+            "svc/pom.xml": POM,
+            "app/settings.gradle": "rootProject.name = 'web'\n",
+            "app/build.gradle": GRADLE,
+            "rs/Cargo.toml": '[package]\nname = "orders-rs"\n\n[dependencies]\nserde = "1"\n',
+            "dotnet/Orders.csproj": CSPROJ,
+        },
+    )
     got = atlas.extract_packages(tmp_path)
     pub = {(p["ecosystem"], p["name"]) for p in got["publishes"]}
     dep = {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
@@ -109,22 +119,31 @@ def test_csproj_without_a_package_id_falls_back_to_the_project_name(tmp_path):
 
 
 def test_maven_property_placeholders_are_not_treated_as_packages(tmp_path):
-    write(tmp_path, {"svc/pom.xml": """<project>
+    write(
+        tmp_path,
+        {
+            "svc/pom.xml": """<project>
   <groupId>com.org</groupId><artifactId>a</artifactId>
   <dependencies>
     <dependency><groupId>${project.groupId}</groupId><artifactId>b</artifactId></dependency>
   </dependencies>
 </project>
-"""})
+"""
+        },
+    )
     assert atlas.extract_packages(tmp_path)["depends_on"] == []
 
 
 def test_maven_child_module_inherits_the_parent_group(tmp_path):
-    write(tmp_path, {"mod/pom.xml": """<project>
+    write(
+        tmp_path,
+        {
+            "mod/pom.xml": """<project>
   <parent><groupId>com.org</groupId><artifactId>root</artifactId></parent>
   <artifactId>orders-api</artifactId>
 </project>
-"""})
+"""
+        },
+    )
     got = atlas.extract_packages(tmp_path)
-    assert {(p["ecosystem"], p["name"]) for p in got["publishes"]} == {
-        ("maven", "com.org:orders-api")}
+    assert {(p["ecosystem"], p["name"]) for p in got["publishes"]} == {("maven", "com.org:orders-api")}

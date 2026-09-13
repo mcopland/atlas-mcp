@@ -18,8 +18,16 @@ def stub_kiro(monkeypatch):
     def fake(cfg, repo, prompt, log_path):
         calls.append(prompt)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        return {"summary": "s", "overview": "o", "domain": "unassigned", "kind": "service",
-                "identifiers": [], "exposes": [], "consumes": [], "datastores": []}
+        return {
+            "summary": "s",
+            "overview": "o",
+            "domain": "unassigned",
+            "kind": "service",
+            "identifiers": [],
+            "exposes": [],
+            "consumes": [],
+            "datastores": [],
+        }
 
     monkeypatch.setattr(atlas, "run_kiro", fake)
     return calls
@@ -33,9 +41,15 @@ def commit(repo, rel, text):
 
 
 def seed(cfg, make_manifest, repo, name, head, **meta):
-    base = {"repo_path": str(repo), "commit": head, "generated_at": atlas.now().isoformat(),
-            "mode": "full", "model": "m", "last_full_at": atlas.now().isoformat(),
-            "dropped_without_evidence": []}
+    base = {
+        "repo_path": str(repo),
+        "commit": head,
+        "generated_at": atlas.now().isoformat(),
+        "mode": "full",
+        "model": "m",
+        "last_full_at": atlas.now().isoformat(),
+        "dropped_without_evidence": [],
+    }
     base.update(meta)
     return make_manifest(cfg, name, _meta=base, summary="old summary")
 
@@ -49,8 +63,7 @@ def test_skips_when_head_is_unchanged(make_repo, make_cfg, make_manifest, gen_ar
     assert stub_kiro == []
 
 
-def test_restamps_when_only_ignored_files_changed(
-        make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+def test_restamps_when_only_ignored_files_changed(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
     repo = make_repo("svc", files={"main.go": "package main", "README.md": "x"})
     cfg = make_cfg(ignore_changes=["*.md"])
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
@@ -63,8 +76,7 @@ def test_restamps_when_only_ignored_files_changed(
     assert written["summary"] == "old summary"
 
 
-def test_updates_and_passes_the_changed_files_to_the_prompt(
-        make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+def test_updates_and_passes_the_changed_files_to_the_prompt(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
     repo = make_repo("svc", files={"main.go": "package main"})
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
@@ -76,8 +88,7 @@ def test_updates_and_passes_the_changed_files_to_the_prompt(
     assert "old summary" in stub_kiro[0]
 
 
-def test_full_regeneration_when_forced(
-        make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+def test_full_regeneration_when_forced(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
@@ -87,8 +98,7 @@ def test_full_regeneration_when_forced(
     assert "Current entry" not in stub_kiro[0]
 
 
-def test_full_regeneration_when_the_old_commit_is_gone(
-        make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+def test_full_regeneration_when_the_old_commit_is_gone(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", "f" * 40)
@@ -97,7 +107,8 @@ def test_full_regeneration_when_the_old_commit_is_gone(
 
 
 def test_oversized_update_prompt_falls_back_to_full(
-        make_repo, make_cfg, make_manifest, gen_args, stub_kiro, monkeypatch):
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro, monkeypatch
+):
     repo = make_repo("svc", files={"main.go": "package main"})
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
@@ -119,20 +130,17 @@ def test_dry_run_never_calls_kiro(make_repo, make_cfg, gen_args, stub_kiro):
     assert not (cfg["atlas_dir"] / "repos" / "svc.json").exists()
 
 
-def test_off_list_domain_is_recorded_in_meta(
-        make_repo, make_cfg, gen_args, monkeypatch):
+def test_off_list_domain_is_recorded_in_meta(make_repo, make_cfg, gen_args, monkeypatch):
     repo = make_repo("svc")
     cfg = make_cfg(domains=["payments"])
-    monkeypatch.setattr(atlas, "run_kiro", lambda *a, **k: {
-        "summary": "s", "domain": "invented", "kind": "service"})
+    monkeypatch.setattr(atlas, "run_kiro", lambda *a, **k: {"summary": "s", "domain": "invented", "kind": "service"})
     atlas.process_repo(cfg, "svc", repo, gen_args)
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
     assert written["domain"] == "unassigned"
     assert written["_meta"]["domain_rejected"] == "invented"
 
 
-def test_unparseable_output_is_retried_once_then_reported(
-        make_repo, make_cfg, gen_args, monkeypatch):
+def test_unparseable_output_is_retried_once_then_reported(make_repo, make_cfg, gen_args, monkeypatch):
     repo = make_repo("svc")
     cfg = make_cfg()
     attempts = []
@@ -148,12 +156,12 @@ def test_unparseable_output_is_retried_once_then_reported(
 
 
 def test_parse_output_reads_the_last_block():
-    text = "noise\n<<<ATLAS_JSON\n{\"a\": 1}\nATLAS_JSON>>>\n"
+    text = 'noise\n<<<ATLAS_JSON\n{"a": 1}\nATLAS_JSON>>>\n'
     assert atlas.parse_output(text) == {"a": 1}
 
 
 def test_parse_output_tolerates_code_fences():
-    text = "<<<ATLAS_JSON\n```json\n{\"a\": 1}\n```\nATLAS_JSON>>>"
+    text = '<<<ATLAS_JSON\n```json\n{"a": 1}\n```\nATLAS_JSON>>>'
     assert atlas.parse_output(text) == {"a": 1}
 
 
@@ -174,7 +182,7 @@ def test_run_kiro_appends_each_attempt_to_the_log(make_repo, make_cfg, monkeypat
 
     class Result:
         returncode = 0
-        stdout = "<<<ATLAS_JSON\n{\"summary\": \"s\"}\nATLAS_JSON>>>"
+        stdout = '<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>'
         stderr = ""
 
     monkeypatch.setattr(atlas.subprocess, "run", lambda *a, **k: Result())
@@ -228,17 +236,20 @@ def test_command_line_disables_line_wrapping(make_cfg, monkeypatch, tmp_path):
 
 
 def test_parse_output_recovers_the_block_from_a_stream_json_transcript():
-    lines = [json.dumps({"type": "assistant", "text": "<<<ATLAS_JSON\n"}),
-             json.dumps({"type": "assistant", "text": '{"summary": "s"}'}),
-             json.dumps({"type": "assistant", "text": "\nATLAS_JSON>>>\n"}),
-             json.dumps({"type": "result", "exit_code": 0})]
+    lines = [
+        json.dumps({"type": "assistant", "text": "<<<ATLAS_JSON\n"}),
+        json.dumps({"type": "assistant", "text": '{"summary": "s"}'}),
+        json.dumps({"type": "assistant", "text": "\nATLAS_JSON>>>\n"}),
+        json.dumps({"type": "result", "exit_code": 0}),
+    ]
     assert atlas.parse_output("\n".join(lines)) == {"summary": "s"}
 
 
 def test_parse_output_prefers_the_last_block_over_a_prompt_echo():
-    lines = [json.dumps({"type": "tool_use", "input": {"prompt": "print <<<ATLAS_JSON here"}}),
-             json.dumps({"type": "assistant",
-                         "text": '<<<ATLAS_JSON\n{"summary": "real"}\nATLAS_JSON>>>'})]
+    lines = [
+        json.dumps({"type": "tool_use", "input": {"prompt": "print <<<ATLAS_JSON here"}}),
+        json.dumps({"type": "assistant", "text": '<<<ATLAS_JSON\n{"summary": "real"}\nATLAS_JSON>>>'}),
+    ]
     assert atlas.parse_output("\n".join(lines))["summary"] == "real"
 
 
@@ -257,8 +268,7 @@ def test_timeout_is_logged_and_blamed_on_approval(make_cfg, monkeypatch, tmp_pat
     log = tmp_path / "logs" / "svc.log"
 
     def boom(*_a, **_k):
-        raise atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1,
-                                              output=b"partial output")
+        raise atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1, output=b"partial output")
 
     monkeypatch.setattr(atlas.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="approval"):

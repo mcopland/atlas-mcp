@@ -3,9 +3,10 @@ import atlas
 
 def test_svc_forms_strips_scheme_port_path_and_credentials():
     assert atlas.svc_forms("https://payments-api.svc.cluster.local:8080/v1/x") == (
-        "payments-api.svc.cluster.local", "payments-api")
-    assert atlas.svc_forms("postgres://u:p@orders-db.internal:5432/mydb") == (
-        "orders-db.internal", "orders-db")
+        "payments-api.svc.cluster.local",
+        "payments-api",
+    )
+    assert atlas.svc_forms("postgres://u:p@orders-db.internal:5432/mydb") == ("orders-db.internal", "orders-db")
     assert atlas.svc_forms("orders") == ("orders", "orders")
 
 
