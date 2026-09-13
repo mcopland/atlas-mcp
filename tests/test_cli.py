@@ -282,3 +282,32 @@ def test_status_reports_a_manifest_with_incomplete_metadata(make_repo, make_cfg,
     make_manifest(cfg, "live", _meta={"commit": "a" * 40})
     atlas.cmd_status(cfg, argparse.Namespace())
     assert "incomplete metadata" in capsys.readouterr().out
+
+
+def test_ignore_changes_defaults_to_the_built_in_list(make_cfg):
+    cfg = make_cfg()
+    assert "*.md" in cfg["ignore_changes"]
+    assert "tests/*" in cfg["ignore_changes"]
+
+
+def test_an_explicit_empty_ignore_changes_is_respected(make_cfg):
+    assert make_cfg(ignore_changes=[])["ignore_changes"] == []
+
+
+def test_dry_run_does_not_block_on_a_held_lock(make_repo, make_cfg, monkeypatch, capsys):
+    make_repo("svc-a")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with atlas.atlas_lock(cfg["atlas_dir"]), pytest.raises(SystemExit) as e:
+        atlas.cmd_generate(cfg, _gen_args(dry_run=True))
+    assert e.value.code == 0
+    assert "dry-run" in capsys.readouterr().out
+
+
+def test_a_real_run_still_blocks_on_a_held_lock(make_repo, make_cfg, monkeypatch):
+    make_repo("svc-a")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with atlas.atlas_lock(cfg["atlas_dir"]), pytest.raises(SystemExit) as e:
+        atlas.cmd_generate(cfg, _gen_args())
+    assert "another atlas run" in str(e.value)

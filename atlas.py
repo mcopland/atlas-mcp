@@ -118,6 +118,35 @@ def expand(p):
     return Path(os.path.expanduser(str(p))).resolve()
 
 
+DEFAULT_IGNORE_CHANGES = [
+    "test/*",
+    "tests/*",
+    "*/test/*",
+    "*/tests/*",
+    "*__tests__*",
+    "*__mocks__*",
+    "*_test.go",
+    "*_test.py",
+    "test_*.py",
+    "*/test_*.py",
+    "*.test.*",
+    "*.spec.*",
+    "docs/*",
+    "*/docs/*",
+    "*.md",
+    "*.txt",
+    "*.png",
+    "*.jpg",
+    "*.gif",
+    "*.svg",
+    ".github/*",
+    ".vscode/*",
+    ".idea/*",
+    "LICENSE",
+    "CHANGELOG*",
+]
+
+
 def load_config(path):
     try:
         cfg = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -141,7 +170,7 @@ def load_config(path):
         "max_changed_files_for_update": 150,
         "max_ambiguous_hits": 3,
         "domains": [],
-        "ignore_changes": [],
+        "ignore_changes": list(DEFAULT_IGNORE_CHANGES),
         "generic_identifiers": [],
     }
     for k, v in defaults.items():
@@ -1045,7 +1074,10 @@ def cmd_generate(cfg, args):
         sys.exit("no repos selected")
 
     errors = 0
-    with atlas_lock(cfg["atlas_dir"], args.force_unlock):
+    # A dry run writes nothing, so make it readable during a real run rather than having it
+    # exit with "another atlas run holds ..." exactly when someone wants to see what is queued.
+    lock = contextlib.nullcontext() if args.dry_run else atlas_lock(cfg["atlas_dir"], args.force_unlock)
+    with lock:
         if not args.dry_run:
             save_repo_map(cfg, repos)
         print(f"{len(items)} repos, model {cfg['model']}, parallel {cfg['parallel']}")
