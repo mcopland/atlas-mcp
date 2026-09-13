@@ -11,21 +11,25 @@ import re
 import subprocess
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 try:
     from mcp.server.mcpserver import MCPServer as Server  # mcp >= 2
 except ImportError:
-    from mcp.server.fastmcp import FastMCP as Server  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as Server  # type: ignore[attr-defined]  # mcp 1.x
 
 ATLAS = Path(os.path.expanduser(os.environ.get("ATLAS_DIR", "~/atlas")))
 server = Server("atlas")
 
 
 class Store:
-    def __init__(self):
-        self.mtime, self.graph, self.manifests, self.blobs = None, {}, {}, None
+    def __init__(self) -> None:
+        self.mtime: float | None = None
+        self.graph: dict[str, Any] = {}
+        self.manifests: dict[str, dict[str, Any]] = {}
+        self.blobs: dict[str, list[tuple[int, str]]] | None = None
 
-    def load(self):
+    def load(self) -> dict[str, Any]:
         path = ATLAS / "graph.json"
         if not path.exists():
             raise RuntimeError(f"no atlas at {path}; run atlas.py generate")
@@ -35,7 +39,7 @@ class Store:
             self.manifests, self.blobs, self.mtime = {}, None, mtime
         return self.graph
 
-    def manifest(self, name):
+    def manifest(self, name: str) -> dict[str, Any]:
         if name not in self.manifests:
             path = ATLAS / "repos" / f"{name}.json"
             self.manifests[name] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -45,7 +49,7 @@ class Store:
 store = Store()
 
 
-def resolve(name):
+def resolve(name: str) -> tuple[str | None, dict[str, Any] | None]:
     """Map a repo name, identifier, or unique substring to a repo name."""
     repos = store.load()["repos"]
     q = name.strip().lower()
@@ -94,7 +98,7 @@ def get_repo(name: str) -> str:
     file paths), datastores, components, resolved dependencies and dependents, source commit, local
     path, and markdown doc path. Accepts a repo name or any identifier (service name, hostname, package)."""
     repo, err = resolve(name)
-    if err:
+    if repo is None:
         return out(err)
     g = store.load()
     m = dict(store.manifest(repo))
@@ -120,7 +124,7 @@ def dependents(name: str, kind: str = "") -> str:
     """Repos that depend on this repo: call its APIs, consume its events, or import its packages.
     Call this before changing an interface to find affected consumers. Optional kind filter."""
     repo, err = resolve(name)
-    if err:
+    if repo is None:
         return out(err)
     edges = [edge_view(e) for e in store.load()["edges"] if e["to"] == repo and (not kind or e["kind"] == kind)]
     return out({"repo": repo, "count": len(edges), "dependents": edges})
@@ -131,7 +135,7 @@ def dependencies(name: str, kind: str = "") -> str:
     """What this repo depends on, plus consumes that could not be matched to any known repo (unresolved,
     often external services or env vars). Optional kind filter."""
     repo, err = resolve(name)
-    if err:
+    if repo is None:
         return out(err)
     g = store.load()
     edges = [edge_view(e) for e in g["edges"] if e["from"] == repo and (not kind or e["kind"] == kind)]
@@ -144,10 +148,10 @@ def find_path(source: str, target: str, max_hops: int = 6) -> str:
     """How two repos are connected: the shortest chain of dependency edges from source to target.
     Falls back to ignoring edge direction if no directed path exists."""
     a, err = resolve(source)
-    if err:
+    if a is None:
         return out(err)
     b, err = resolve(target)
-    if err:
+    if b is None:
         return out(err)
     edges = store.load()["edges"]
     for directed in (True, False):
@@ -156,13 +160,14 @@ def find_path(source: str, target: str, max_hops: int = 6) -> str:
             adj.setdefault(e["from"], []).append((e["to"], e))
             if not directed:
                 adj.setdefault(e["to"], []).append((e["from"], e))
-        prev, queue = {a: None}, deque([(a, 0)])
+        prev: dict[str, tuple[str, dict[str, Any]] | None] = {a: None}
+        queue = deque([(a, 0)])
         while queue:
             node, depth = queue.popleft()
             if node == b:
                 hops = []
-                while prev[node]:
-                    node, e = prev[node]
+                while (step := prev[node]) is not None:
+                    node, e = step
                     hops.append(edge_view(e))
                 return out({"source": a, "target": b, "directed": directed, "hops": list(reversed(hops))})
             if depth < max_hops:
@@ -178,7 +183,10 @@ def _blobs():
         store.blobs = {}
         for n in store.load()["repos"]:
             m = store.manifest(n)
-            text = lambda items: " ".join(f"{i.get('name', '')} {i.get('key', '')}" for i in items).lower()
+
+            def text(items):
+                return " ".join(f"{i.get('name', '')} {i.get('key', '')}" for i in items).lower()
+
             store.blobs[n] = [
                 (5, n.lower()),
                 (4, " ".join(str(i) for i in m.get("identifiers", [])).lower()),
@@ -229,7 +237,7 @@ def freshness(name: str = "") -> str:
     g = store.load()
     if name:
         repo, err = resolve(name)
-        if err:
+        if repo is None:
             return out(err)
         names = [repo]
     else:
@@ -261,7 +269,7 @@ def freshness(name: str = "") -> str:
                         timeout=5,
                     ).stdout.strip()
                     row["commits_behind"] = int(behind) if behind.isdigit() else None
-        except Exception as e:
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
             row["status"] = f"error: {e}"
         rows.append(row)
     stale = sum(1 for r in rows if r["status"] != "fresh")
@@ -281,7 +289,7 @@ def get_doc(name: str) -> str:
     resolved targets, dependents, datastores, and a component diagram. Use after get_repo when
     you want the prose and the diagram rather than structured fields."""
     repo, err = resolve(name)
-    if err:
+    if repo is None:
         return out(err)
     path = Path(store.load()["repos"][repo]["doc"])
     if not path.exists():

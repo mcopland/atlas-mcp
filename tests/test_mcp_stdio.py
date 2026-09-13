@@ -71,16 +71,15 @@ def test_server_serves_its_tools_over_stdio(served_atlas):
         params = StdioServerParameters(
             command=sys.executable, args=[str(KIT / "atlas_mcp.py")], env={"ATLAS_DIR": str(served_atlas)}
         )
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                listed = await session.list_tools()
-                assert sorted(t.name for t in listed.tools) == TOOLS
-                assert all(t.description for t in listed.tools)
-                repos = json.loads(_text(await session.call_tool("list_repos", {})))
-                assert [r["name"] for r in repos["repos"]] == ["orders"]
-                doc = _text(await session.call_tool("get_doc", {"name": "orders.internal"}))
-                assert doc.startswith("# orders")
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            assert sorted(t.name for t in listed.tools) == TOOLS
+            assert all(t.description for t in listed.tools)
+            repos = json.loads(_text(await session.call_tool("list_repos", {})))
+            assert [r["name"] for r in repos["repos"]] == ["orders"]
+            doc = _text(await session.call_tool("get_doc", {"name": "orders.internal"}))
+            assert doc.startswith("# orders")
 
     async def main():
         with anyio.fail_after(90):

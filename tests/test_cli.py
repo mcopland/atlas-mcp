@@ -37,10 +37,8 @@ def test_config_extends_the_generic_identifier_stoplist(make_cfg):
 
 def test_lock_blocks_a_second_run(tmp_path):
     ad = tmp_path / "atlas"
-    with atlas.atlas_lock(ad):
-        with pytest.raises(SystemExit) as e:
-            with atlas.atlas_lock(ad):
-                pass
+    with atlas.atlas_lock(ad), pytest.raises(SystemExit) as e, atlas.atlas_lock(ad):
+        pass
     assert "another atlas run" in str(e.value)
 
 
@@ -54,9 +52,8 @@ def test_lock_is_released_after_a_clean_run(tmp_path):
 
 def test_lock_is_released_when_the_run_raises(tmp_path):
     ad = tmp_path / "atlas"
-    with pytest.raises(RuntimeError):
-        with atlas.atlas_lock(ad):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), atlas.atlas_lock(ad):
+        raise RuntimeError("boom")
     with atlas.atlas_lock(ad):
         pass
 
@@ -72,9 +69,8 @@ def test_force_unlock_clears_a_stale_lock_file(tmp_path):
     ad = tmp_path / "atlas"
     ad.mkdir(parents=True)
     (ad / ".generate.lock").write_text("pid 999999 started earlier\n")
-    with pytest.raises(SystemExit):
-        with atlas.atlas_lock(ad):
-            pass
+    with pytest.raises(SystemExit), atlas.atlas_lock(ad):
+        pass
     with atlas.atlas_lock(ad, force=True):
         pass
 

@@ -111,7 +111,7 @@ TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 
 
 def now():
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def expand(p):
@@ -178,7 +178,7 @@ def atlas_lock(atlas_dir, force=False):
     path = atlas_dir / ".generate.lock"
     stamp = f"pid {os.getpid()} started {now().isoformat(timespec='seconds')}\n"
     if fcntl is not None:
-        fh = open(path, "a+", encoding="utf-8")
+        fh = open(path, "a+", encoding="utf-8")  # noqa: SIM115 - released in the finally below, not at end of scope
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -279,7 +279,7 @@ def save_repo_map(cfg, repos):
     new = {n: str(p) for n, p in sorted(repos.items())}
     old = {}
     if path.exists():
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, json.JSONDecodeError):
             old = json.loads(path.read_text(encoding="utf-8"))
     was = {v: k for k, v in old.items()}
     for name, p in new.items():
@@ -430,13 +430,18 @@ def extract_packages(repo):
                         name = node.get("Include") or node.get("Update") or ""
                         if "$(" not in name:
                             dep("nuget", name, f)
-        except Exception as e:  # malformed manifests should not stop the run
+        # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; the parsers
+        # also raise AttributeError/TypeError on structurally surprising but valid documents.
+        except (OSError, ValueError, ET.ParseError, AttributeError, TypeError) as e:
             print(f"warn: could not parse {f}: {e}", file=sys.stderr)
 
     for key in list(depends):
         if key in publishes:  # internal to a monorepo
             del depends[key]
-    to_list = lambda d: [{"ecosystem": e, "name": n, "evidence": ev} for (e, n), ev in sorted(d.items())]
+
+    def to_list(d):
+        return [{"ecosystem": e, "name": n, "evidence": ev} for (e, n), ev in sorted(d.items())]
+
     return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
 
 
@@ -538,7 +543,7 @@ def run_kiro(cfg, repo, prompt, log_path):
     except subprocess.TimeoutExpired as e:
         partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         log_append(log_path, header + "TIMEOUT\n" + ANSI.sub("", partial) + "\n")
-        raise RuntimeError("timed out; usually a tool call waiting for approval (see README)")
+        raise RuntimeError("timed out; usually a tool call waiting for approval (see README)") from e
     log_append(
         log_path,
         header
@@ -610,10 +615,10 @@ def process_repo(cfg, name, repo, args):
     if args.pull:
         try:
             git(repo, "pull", "--ff-only", timeout=300)
-        except Exception as e:
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             print(f"warn: {name}: pull failed: {e}", file=sys.stderr)
     head = git(repo, "rev-parse", "HEAD")
-    old = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+    old = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
     meta = (old or {}).get("_meta", {})
     mode, changed = "full", []
 
@@ -629,7 +634,7 @@ def process_repo(cfg, name, repo, args):
                     mode = "restamp"
                 elif len(relevant) <= cfg["max_changed_files_for_update"]:
                     mode, changed = "update", relevant
-            except Exception:
+            except (RuntimeError, OSError, subprocess.SubprocessError):
                 mode = "full"  # old commit missing (rewritten history, shallow clone)
 
     if args.dry_run:
