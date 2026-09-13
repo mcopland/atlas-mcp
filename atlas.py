@@ -811,7 +811,7 @@ def build(cfg, known):
                     "name": item.get("name", key),
                     "detail": item.get("detail", ""),
                     "evidence": item.get("evidence"),
-                    "match": "ambiguous" if len(hits) > 1 else strength,
+                    "match": "ambiguous" if len(hits) > 1 and not fan_in else strength,
                 }
             )
 

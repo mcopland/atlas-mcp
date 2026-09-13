@@ -336,6 +336,9 @@ def test_many_producers_of_one_topic_still_link(make_cfg, make_manifest, graph_o
     g = graph_of(cfg)
     assert sorted(e["to"] for e in g["edges"]) == [f"producer-{i}" for i in range(4)]
     assert g["unresolved"] == []
+    # Several producers of one topic is the normal pub/sub shape, not a weak guess, so the
+    # edges must keep the tier they matched at rather than being demoted to "ambiguous".
+    assert {e["match"] for e in g["edges"]} == {"exact"}
 
 
 def test_a_generically_named_repo_does_not_attract_alias_matches(make_cfg, make_manifest, graph_of):
