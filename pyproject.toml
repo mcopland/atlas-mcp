@@ -17,11 +17,3 @@ dev = ["pytest>=8", "mcp>=1"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
-
-[tool.ruff]
-# The codebase is written denser than ruff's 88-column default; 120 keeps the
-# reformat from exploding expressions that read fine on one line.
-line-length = 120
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "B", "UP", "SIM"]
