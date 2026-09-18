@@ -104,7 +104,14 @@ def list_repos(domain: str = "", kind: str = "") -> str:
     (service, library, frontend, infra, job, tool)."""
     g = store.load()
     rows = [
-        {"name": n, "summary": r["summary"], "domain": r["domain"], "kind": r["kind"]}
+        {
+            "name": n,
+            "summary": r["summary"],
+            "domain": r["domain"],
+            "kind": r["kind"],
+            "remote_url": r.get("remote_url"),
+            "last_commit_at": r.get("last_commit_at"),
+        }
         for n, r in sorted(g["repos"].items())
         if (not domain or r["domain"] == domain.lower()) and (not kind or r["kind"] == kind.lower())
     ]
@@ -132,6 +139,8 @@ def get_repo(name: str) -> str:
             "commit": meta.get("commit"),
             "generated_at": meta.get("generated_at"),
             "repo_path": meta.get("repo_path"),
+            "remote_url": meta.get("remote_url"),
+            "last_commit_at": meta.get("last_commit_at"),
             "doc": g["repos"][repo]["doc"],
             "depends_on": [edge_view(e) for e in g["edges"] if e["from"] == repo],
             "used_by": [edge_view(e) for e in g["edges"] if e["to"] == repo],

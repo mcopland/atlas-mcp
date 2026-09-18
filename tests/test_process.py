@@ -460,6 +460,61 @@ def test_a_stale_facts_version_restamps_instead_of_skipping(
     assert written["_meta"]["facts_version"] == atlas.FACTS_VERSION
 
 
+def test_meta_records_the_remote_url_and_the_last_commit_date(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    repo = make_repo("svc")
+    atlas.git(repo, "remote", "add", "origin", "git@github.com:org/orders.git")
+    cfg = make_cfg()
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
+    assert meta["remote_url"] == "https://github.com/org/orders"
+    assert meta["last_commit_at"].startswith(str(atlas.now().year))
+
+
+def test_a_clone_without_an_origin_records_no_remote_url(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro, capsys
+):
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
+    assert meta["remote_url"] is None
+    assert meta["last_commit_at"] is not None
+
+
+def test_a_restamp_backfills_the_git_metadata(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """The whole org gains the two fields on the free path after a facts_version bump."""
+    repo = make_repo("svc")
+    atlas.git(repo, "remote", "add", "origin", "https://github.com/org/orders.git")
+    cfg = make_cfg()
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    seed(cfg, make_manifest, repo, "svc", head, facts_version=atlas.FACTS_VERSION - 1)
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
+    assert meta["remote_url"] == "https://github.com/org/orders"
+    assert meta["last_commit_at"] is not None
+
+
+def test_a_skipped_repo_reads_git_only_to_check_its_head(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro, monkeypatch
+):
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    calls = []
+    original = atlas.git
+    monkeypatch.setattr(
+        atlas, "git", lambda r, *a, **kw: calls.append(a[0]) or original(r, *a, **kw)
+    )
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "skip"
+    assert calls == ["rev-parse"]
+
+
 def test_a_manifest_predating_the_extractors_restamps(
     make_repo, make_cfg, make_manifest, gen_args, stub_kiro
 ):

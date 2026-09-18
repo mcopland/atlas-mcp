@@ -256,6 +256,35 @@ def git(repo, *args, timeout=60):
     return r.stdout.strip()
 
 
+def normalize_remote(url):
+    """One clickable https form whatever the clone used, with any embedded credential dropped:
+    this URL is written to graph.json and read back by a model. A path or a scheme that has no
+    web form is left alone rather than guessed at."""
+    url = URL_CREDENTIALS.sub("://", url.strip())
+    if m := re.fullmatch(r"(?:ssh|git)://(?:[^@/]+@)?(.+)", url):
+        url = "https://" + m.group(1)
+    elif m := re.fullmatch(r"(?:[\w.\-]+@)?([\w.\-]+):(?!/)(\S+)", url):  # scp form
+        url = f"https://{m.group(1)}/{m.group(2)}"
+    return re.sub(r"\.git/?$", "", url) if url.startswith("http") else url
+
+
+def repo_remote_url(repo):
+    """None rather than a raise: a clone with no origin is unusual, not a reason to fail a repo."""
+    try:
+        return normalize_remote(git(repo, "remote", "get-url", "origin")) or None
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def repo_last_commit_at(repo):
+    """Committer date in strict ISO 8601. A year-old date is the dead-repo signal an agent needs
+    before it trusts what an entry says."""
+    try:
+        return git(repo, "log", "-1", "--format=%cI") or None
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+
+
 def human_bytes(n):
     if n < 1024:
         return f"{n} B"
@@ -741,7 +770,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 1
+FACTS_VERSION = 2
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -1541,9 +1570,9 @@ def process_repo(cfg, name, repo, args):
     stamp = prompt_hash(mapper)
 
     if old and not args.full and meta.get("prompt_hash") == stamp:
-        # A new extractor does not move the prompt hash, so without the facts stamp a repo whose
-        # commit has not changed would never pick one up. A stale stamp lands in restamp, which
-        # re-reads the deterministic facts without spending a credit.
+        # Nothing atlas.py reads out of a repo itself moves the prompt hash, so without the facts
+        # stamp a repo whose commit has not changed would never pick up a new extractor or a new
+        # field in _meta. A stale stamp lands in restamp, which re-reads it all without a credit.
         if meta.get("commit") == head and meta.get("facts_version") == FACTS_VERSION:
             return name, "skip", "up to date"
         full_due = is_full_due(meta.get("last_full_at"), cfg["full_regen_days"])
@@ -1565,6 +1594,9 @@ def process_repo(cfg, name, repo, args):
     if args.dry_run:
         return name, "dry-run", mode
 
+    # Read after the skip and dry-run branches, so neither pays for a subprocess it cannot use.
+    remote_url = repo_remote_url(repo)
+    last_commit_at = repo_last_commit_at(repo)
     prompt_bytes = 0
     if mode == "restamp":
         manifest = {k: v for k, v in old.items() if k != "_meta"}
@@ -1615,7 +1647,9 @@ def process_repo(cfg, name, repo, args):
     manifest["packages"] = extract_packages(repo)
     manifest["_meta"] = {
         "repo_path": str(repo),
+        "remote_url": remote_url,
         "commit": head,
+        "last_commit_at": last_commit_at,
         "generated_at": now().isoformat(timespec="seconds"),
         "mode": mode,
         "mapper_mode": mapper,
@@ -1855,6 +1889,10 @@ def build(cfg, known):
                 "commit": m["_meta"]["commit"],
                 "generated_at": m["_meta"]["generated_at"],
                 "repo_path": m["_meta"]["repo_path"],
+                # .get: an entry written before these existed still builds, and stays that way
+                # until its repo next changes or the facts stamp moves.
+                "remote_url": m["_meta"].get("remote_url"),
+                "last_commit_at": m["_meta"].get("last_commit_at"),
                 "doc": str(ad / "docs" / f"{n}.md"),
             }
             for n, m in manifests.items()

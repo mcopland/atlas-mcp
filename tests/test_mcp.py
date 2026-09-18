@@ -32,6 +32,8 @@ def manifest(name, **fields):
             "generated_at": "2026-01-01T00:00:00+00:00",
             "repo_path": "/src/" + name,
             "mode": "full",
+            "remote_url": f"https://github.com/org/{name}",
+            "last_commit_at": "2025-12-25T09:00:00+00:00",
         },
     }
     m.update(fields)
@@ -90,6 +92,8 @@ def repo_row(tmp_path, name, domain="payments", kind="service", identifiers=()):
         "commit": "a" * 40,
         "generated_at": "2026-01-01T00:00:00+00:00",
         "repo_path": str(tmp_path / name),
+        "remote_url": f"https://github.com/org/{name}",
+        "last_commit_at": "2025-12-25T09:00:00+00:00",
         "doc": str(tmp_path / "docs" / f"{name}.md"),
     }
 
@@ -173,6 +177,12 @@ def test_list_repos_returns_every_repo_with_domains(loaded):
     assert [r["name"] for r in got["repos"]] == ["billing", "orders", "web"]
 
 
+def test_list_repos_carries_the_remote_url_and_last_commit_date(loaded):
+    row = next(r for r in json.loads(atlas_mcp.list_repos())["repos"] if r["name"] == "orders")
+    assert row["remote_url"] == "https://github.com/org/orders"
+    assert row["last_commit_at"] == "2025-12-25T09:00:00+00:00"
+
+
 def test_list_repos_filters_by_domain_and_kind(loaded):
     assert json.loads(atlas_mcp.list_repos(domain="identity"))["count"] == 1
     assert json.loads(atlas_mcp.list_repos(kind="frontend"))["count"] == 1
@@ -199,6 +209,12 @@ def test_get_repo_joins_edges_and_unresolved(loaded):
     assert got["shared_datastores"][0]["name"] == "orders_db"
     assert "packages" not in got
     assert "_meta" not in got
+
+
+def test_get_repo_carries_the_remote_url_and_last_commit_date(loaded):
+    got = json.loads(atlas_mcp.get_repo("orders"))
+    assert got["remote_url"] == "https://github.com/org/orders"
+    assert got["last_commit_at"] == "2025-12-25T09:00:00+00:00"
 
 
 def test_get_repo_resolves_by_identifier(loaded):

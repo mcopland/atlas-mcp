@@ -1,4 +1,25 @@
+import pytest
+
 import atlas
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("https://github.com/org/orders.git", "https://github.com/org/orders"),
+        ("https://github.com/org/orders", "https://github.com/org/orders"),
+        ("https://x-token:abc123@github.com/org/orders.git", "https://github.com/org/orders"),
+        ("git@github.com:org/orders.git", "https://github.com/org/orders"),
+        ("ssh://git@ghe.corp:2222/org/orders.git", "https://ghe.corp:2222/org/orders"),
+        ("git://ghe.corp/org/orders.git", "https://ghe.corp/org/orders"),
+        ("http://ghe.corp/org/orders.git/", "http://ghe.corp/org/orders"),
+        ("/srv/mirrors/orders.git", "/srv/mirrors/orders.git"),
+        ("file:///srv/mirrors/orders.git", "file:///srv/mirrors/orders.git"),
+        ("", ""),
+    ],
+)
+def test_normalize_remote_yields_one_credential_free_form(raw, expected):
+    assert atlas.normalize_remote(raw) == expected
 
 
 def test_svc_forms_strips_scheme_port_path_and_credentials():

@@ -341,6 +341,27 @@ def test_build_renders_docs_and_leaves_no_staging_dirs(make_cfg, make_manifest, 
     assert g["repos"]["svc-a"]["doc"] == str(ad / "docs" / "svc-a.md")
 
 
+def test_graph_entries_carry_the_remote_url_and_last_commit_date(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    m = make_manifest(cfg, "svc-a")
+    m["_meta"].update(
+        remote_url="https://github.com/org/svc-a", last_commit_at="2025-12-25T09:00:00+00:00"
+    )
+    atlas.write_json(cfg["atlas_dir"] / "repos" / "svc-a.json", m)
+    entry = graph_of(cfg)["repos"]["svc-a"]
+    assert entry["remote_url"] == "https://github.com/org/svc-a"
+    assert entry["last_commit_at"] == "2025-12-25T09:00:00+00:00"
+
+
+def test_a_manifest_without_the_git_metadata_still_builds(make_cfg, make_manifest, graph_of):
+    """Every entry written before those fields existed, until its repo next changes."""
+    cfg = make_cfg()
+    make_manifest(cfg, "svc-a")
+    entry = graph_of(cfg)["repos"]["svc-a"]
+    assert entry["remote_url"] is None
+    assert entry["last_commit_at"] is None
+
+
 def test_rebuild_removes_docs_for_repos_that_disappear(make_cfg, make_manifest, graph_of):
     cfg = make_cfg()
     make_manifest(cfg, "keeper")
