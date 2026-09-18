@@ -1106,8 +1106,38 @@ ENV_INTERESTING = (
 )
 
 
+def bundle_path_ok(rel, repo):
+    """The limits the walk enforces by not descending, applied to a path it did not produce, so
+    both collectors agree on what a bundle may contain. The is_file check also drops submodules,
+    which git lists as paths but which nothing here can read."""
+    parts = rel.split("/")
+    if len(parts) - 1 > BUNDLE_WALK_DEPTH:
+        return False
+    if any(d in SKIP_DIRS or (d.startswith(".") and d not in BUNDLE_DOT_DIRS) for d in parts[:-1]):
+        return False
+    return (repo / rel).is_file()
+
+
+def tracked_files(repo):
+    """git knows what .gitignore says and os.walk does not, so build output and local scratch
+    never reach the tree, the excerpts or the signal scan. None when there is nothing to list,
+    which is the only case the walk still has to cover."""
+    try:
+        listing = git(repo, "ls-files", "-z", "--cached", "--exclude-standard")
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None  # not a work tree: falling back to the walk is the documented behaviour
+    # git() strips whitespace and NUL is not whitespace, so the trailing separator survives.
+    rels = sorted(r for r in listing.split("\0") if r and bundle_path_ok(r, repo))
+    return rels[:BUNDLE_MAX_FILES] or None
+
+
 def bundle_files(repo):
-    """Every candidate path, repo-relative and sorted. `.github` is the one dot-directory worth
+    """Every candidate path, repo-relative and sorted."""
+    return tracked_files(repo) or walked_files(repo)
+
+
+def walked_files(repo):
+    """The fallback for a path git will not list. `.github` is the one dot-directory worth
     descending into, because CODEOWNERS often lives there."""
     out = []
     for dirpath, dirnames, files in os.walk(repo):
@@ -1185,6 +1215,8 @@ def signal_sections(repo, paths):
     """One line per distinct target, so a URL repeated in fifty call sites costs one slot."""
     found = {name: {} for name in SIGNAL_PATTERNS}
     for rel in paths:
+        if all(len(hits) >= BUNDLE_SIGNALS_PER_CATEGORY for hits in found.values()):
+            break  # every category full: the rest can only be read, scanned and thrown away
         # Not Path.suffix: pathlib reports no suffix for a dotfile, which would skip `.env`.
         if "." + rel.rsplit(".", 1)[-1] not in SIGNAL_EXTS:
             continue

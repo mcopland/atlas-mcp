@@ -115,6 +115,57 @@ def test_the_bundle_lists_the_tree_and_skips_vendored_and_dot_directories(make_r
     assert ".venv" not in text
 
 
+def test_the_bundle_lists_tracked_files_and_ignores_untracked_build_output(make_repo):
+    repo = make_repo(
+        "svc",
+        files={"main.go": "package main", ".gitignore": "generated.go\n"},
+    )
+    (repo / "out").mkdir()
+    (repo / "out" / "app.js").write_text('u := "https://untracked.internal"')
+    (repo / "generated.go").write_text('u := "https://ignored.internal"')
+    text = bundle(repo)
+    assert "main.go" in text
+    assert "out/app.js" not in text
+    assert "untracked.internal" not in text
+    assert "generated.go" not in text
+    assert "ignored.internal" not in text
+
+
+def test_the_bundle_falls_back_to_walking_a_path_that_is_not_a_git_repo(tmp_path):
+    repo = tmp_path / "plain"
+    (repo / "internal").mkdir(parents=True)
+    (repo / "main.go").write_text("package main")
+    (repo / "internal" / "db.go").write_text('u := "https://orders.internal"')
+    text = bundle(repo)
+    assert "main.go" in text
+    assert "internal/db.go" in text
+    assert "orders.internal" in text
+
+
+def test_a_tracked_file_below_the_walk_depth_is_left_out(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "a/b/c/d/shallow.go": 'u := "https://shallow.internal"',
+            "a/b/c/d/e/deep.go": 'u := "https://deep.internal"',
+        },
+    )
+    text = bundle(repo)
+    assert "shallow.internal" in text
+    assert "deep.go" not in text
+    assert "deep.internal" not in text
+
+
+def test_a_tracked_submodule_is_not_read_as_a_file(make_repo, capsys):
+    repo = make_repo("svc", files={"main.go": "package main"})
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    atlas.git(repo, "update-index", "--add", "--cacheinfo", f"160000,{head},vendored-sub")
+    text = bundle(repo)
+    assert "main.go" in text
+    assert "vendored-sub" not in text
+    assert "warn:" not in capsys.readouterr().err
+
+
 def test_the_tree_is_capped(make_repo, monkeypatch):
     files = {f"pkg/f{i}.go": "package pkg" for i in range(30)}
     repo = make_repo("svc", files=files)
@@ -250,6 +301,30 @@ def test_signals_per_category_are_capped(make_repo, monkeypatch):
     monkeypatch.setattr(atlas, "BUNDLE_SIGNALS_PER_CATEGORY", 5)
     urls = bundle(repo).split("### url\n", 1)[1].split("###")[0]
     assert len([ln for ln in urls.splitlines() if ln.strip()]) == 5
+
+
+def test_the_signal_scan_stops_once_every_category_is_full(make_repo, monkeypatch):
+    """The per-category cap alone still reads and scans every remaining file."""
+    saturating = (
+        'u := "https://orders.internal/v1"\n'
+        'os.Getenv("EVENTS_QUEUE")\n'
+        'producer.publish("order.created", payload)\n'
+        'dsn := "postgres://db.internal:5432/orders"\n'
+        'grpc.Dial("inventory.internal:443")\n'
+    )
+    repo = make_repo(
+        "svc",
+        files={"a_first.go": saturating, "z_last.go": 'u := "https://late.internal"'},
+    )
+    monkeypatch.setattr(atlas, "BUNDLE_SIGNALS_PER_CATEGORY", 1)
+    read = []
+    original = atlas.read_capped
+    monkeypatch.setattr(
+        atlas, "read_capped", lambda p, cap: read.append(p.name) or original(p, cap)
+    )
+    bundle(repo)
+    assert "a_first.go" in read
+    assert "z_last.go" not in read
 
 
 def test_a_long_signal_line_is_trimmed(make_repo):
