@@ -131,6 +131,27 @@ SECRET_ASSIGNMENT = re.compile(
 # start at every character of a long token and backtrack, which is quadratic on minified files.
 URL_CREDENTIALS = re.compile(r"://[^/\s@:]+:[^/\s@]*@")
 OPAQUE_LITERAL = re.compile(r"""(?<=["'])[A-Za-z0-9_\-]{32,}(?=["'])""")
+# The markers are kept so the bundle still says a key lives here; only the body goes. Ending on
+# \Z as well covers a block the file cuts short, which is what a truncated read leaves behind.
+PEM_BLOCK = re.compile(
+    r"(-----BEGIN [A-Z ]*PRIVATE KEY-----).*?(-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+# These carry their own prefix, so they are recognisable with neither an assignment nor a quoted
+# literal around them, which is what the three rules above need: an unquoted YAML value, a token
+# pasted into a comment. Every alternative starts with a literal, for the reason noted above.
+PROVIDER_SECRET = re.compile(
+    r"""(?:
+        (?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA)[0-9A-Z]{16}   # AWS access key id
+      | gh[pousr]_[A-Za-z0-9]{36}                                           # GitHub token
+      | github_pat_[A-Za-z0-9_]{60,}                                        # GitHub fine-grained PAT
+      | xox[abposr]-[A-Za-z0-9-]{10,}                                       # Slack token
+      | AIza[0-9A-Za-z_\-]{35}                                              # Google API key
+      | https://hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}               # Slack webhook
+      | eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,} # JWT
+    )""",
+    re.VERBOSE,
+)
 
 
 # ---------- helpers ----------
@@ -1286,15 +1307,19 @@ def gather_bundle(repo, budget, only=None):
 
 
 def redact(text):
-    """Mask secret values before repo content reaches the model or the atlas: assignments to
-    secret-looking keys, credentials embedded in URLs, and long opaque quoted literals."""
+    """Mask secret values before repo content reaches the model or the atlas: private key blocks,
+    assignments to secret-looking keys, credentials embedded in URLs, tokens whose provider prefix
+    gives them away, and long opaque quoted literals."""
 
     def opaque(m):
         s = m.group(0)
         return "<redacted>" if re.search(r"[A-Za-z]", s) and re.search(r"[0-9]", s) else s
 
+    # The multi-line rule runs first, so the line-scoped ones never see a key body.
+    text = PEM_BLOCK.sub(r"\1\n<redacted>\n\2", text)
     text = SECRET_ASSIGNMENT.sub(r"\g<1><redacted>", text)
     text = URL_CREDENTIALS.sub("://<redacted>@", text)
+    text = PROVIDER_SECRET.sub("<redacted>", text)
     return OPAQUE_LITERAL.sub(opaque, text)
 
 

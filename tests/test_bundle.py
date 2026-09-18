@@ -39,10 +39,61 @@ import atlas
             'mod = "github.com/org/some-module-name-that-is-quite-long-v2"',
         ),
         ("plain line of code", "plain line of code"),
+        ("aws_key_id = AKIAIOSFODNN7EXAMPLE", "aws_key_id = <redacted>"),
+        ("  accessKeyId: AKIAIOSFODNN7EXAMPLE", "  accessKeyId: <redacted>"),
+        ("# example: ghp_" + "a" * 36, "# example: <redacted>"),
+        ("pat = github_pat_" + "a" * 22 + "_" + "b" * 59, "pat = <redacted>"),
+        ("slack = xoxb-123456789012-abcdefghijkl", "slack = <redacted>"),
+        ("google = AIza" + "b" * 35, "google = <redacted>"),
+        (
+            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            "Bearer <redacted>",
+        ),
+        (
+            (
+                'hook = "https://hooks.slack.com/services/'
+                + 'T00000000/B00000000/abcdefghijklmnopqrstuvwx"'
+            ),
+            'hook = "<redacted>"',
+        ),
+        (
+            "commit 9e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b",
+            "commit 9e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b",
+        ),
+        ("lowercase akiaiosfodnn7example", "lowercase akiaiosfodnn7example"),
+        (
+            'hook = "https://hooks.example.com/services/team/channel"',
+            'hook = "https://hooks.example.com/services/team/channel"',
+        ),
     ],
 )
 def test_redact_masks_secret_values_and_leaves_other_lines_alone(line, expected):
     assert atlas.redact(line) == expected
+
+
+def test_redact_masks_a_private_key_block():
+    text = (
+        "key: |\n"
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEowIBAAKCAQEAxLpuLzPtPPUQmVNQWsG\n"
+        "9fZLpFNnaKcPQHHkiM0rqLNEEoZWFLbTfKA\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        'url = "https://orders.internal"\n'
+    )
+    got = atlas.redact(text)
+    assert "MIIEowIBAAKCAQEAxLpuLzPtPPUQmVNQWsG" not in got
+    assert "9fZLpFNnaKcPQHHkiM0rqLNEEoZWFLbTfKA" not in got
+    assert "-----BEGIN RSA PRIVATE KEY-----" in got
+    assert "-----END RSA PRIVATE KEY-----" in got
+    assert '"https://orders.internal"' in got
+
+
+def test_redact_masks_a_private_key_block_the_file_cuts_short():
+    text = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU\n"
+    got = atlas.redact(text)
+    assert "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU" not in got
+    assert "<redacted>" in got
 
 
 def test_redact_stays_linear_on_a_long_single_line(monkeypatch):
@@ -50,7 +101,15 @@ def test_redact_stays_linear_on_a_long_single_line(monkeypatch):
     at every character and backtrack turns that into minutes of CPU per repo."""
     import time
 
-    text = json.dumps({"x": "y" * 200_000})
+    text = json.dumps(
+        {
+            "x": "y" * 200_000,
+            "jwt": "eyJnope " * 25_000,
+            "aws": "AKIAnope " * 25_000,
+            "gh": "ghp_nope " * 25_000,
+            "pem": "-----BEGIN nope " * 12_500,
+        }
+    )
     start = time.monotonic()
     atlas.redact(text)
     assert time.monotonic() - start < 2.0
