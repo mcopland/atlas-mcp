@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("mcp", reason="install the mcp package to run the MCP server tests")
 
-import atlas_mcp  # noqa: E402
+import atlas_mcp
 
 
 def manifest(name, **fields):
@@ -40,7 +40,11 @@ def manifest(name, **fields):
 
 def _git(path, *args):
     return subprocess.run(
-        ["git", "-C", str(path), *args], check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
     ).stdout.strip()
 
 
@@ -121,17 +125,40 @@ def loaded(atlas_env, tmp_path):
                 "match": "alias",
             },
         ],
-        "unresolved": [{"repo": "web", "kind": "http", "key": "stripe.com", "name": "stripe", "evidence": "c.go"}],
+        "unresolved": [
+            {
+                "repo": "web",
+                "kind": "http",
+                "key": "stripe.com",
+                "name": "stripe",
+                "evidence": "c.go",
+            }
+        ],
         "shared_datastores": [{"name": "orders_db", "repos": {"orders": "owner", "web": "read"}}],
     }
     manifests = {
         "orders": manifest(
             "orders",
             identifiers=["orders.internal"],
-            exposes=[{"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": "a.go"}],
+            exposes=[
+                {
+                    "kind": "topic",
+                    "name": "OrderCreated",
+                    "key": "order.created",
+                    "evidence": "a.go",
+                }
+            ],
         ),
         "web": manifest(
-            "web", consumes=[{"kind": "topic", "name": "OrderCreated", "key": "order.created", "evidence": "b.go"}]
+            "web",
+            consumes=[
+                {
+                    "kind": "topic",
+                    "name": "OrderCreated",
+                    "key": "order.created",
+                    "evidence": "b.go",
+                }
+            ],
         ),
         "billing": manifest("billing"),
     }
@@ -252,7 +279,13 @@ def test_freshness_reports_fresh_then_stale_after_a_commit(atlas_env, tmp_path):
     row["repo_path"] = str(repo)
     row["commit"] = head
     atlas_env(
-        {"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [], "shared_datastores": []},
+        {
+            "generated_at": "x",
+            "repos": {"orders": row},
+            "edges": [],
+            "unresolved": [],
+            "shared_datastores": [],
+        },
         {"orders": manifest("orders")},
     )
 
@@ -271,7 +304,13 @@ def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_
     row["repo_path"] = str(repo)
     row["commit"] = heads[0]
     atlas_env(
-        {"generated_at": "x", "repos": {"orders": row}, "edges": [], "unresolved": [], "shared_datastores": []},
+        {
+            "generated_at": "x",
+            "repos": {"orders": row},
+            "edges": [],
+            "unresolved": [],
+            "shared_datastores": [],
+        },
         {"orders": manifest("orders")},
     )
     calls = []
@@ -295,7 +334,13 @@ def test_resolve_refuses_to_guess_when_an_identifier_is_claimed_twice(atlas_env,
         "orders-legacy": repo_row(tmp_path, "orders-legacy"),
     }
     atlas_env(
-        {"generated_at": "x", "repos": repos, "edges": [], "unresolved": [], "shared_datastores": []},
+        {
+            "generated_at": "x",
+            "repos": repos,
+            "edges": [],
+            "unresolved": [],
+            "shared_datastores": [],
+        },
         {n: manifest(n) for n in repos},
     )
     name, err = atlas_mcp.resolve("orders")

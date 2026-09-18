@@ -29,6 +29,19 @@ def test_load_config_applies_defaults(make_cfg):
     assert "api" in cfg["generic_identifiers"]
 
 
+def test_load_config_defaults_to_bundle_mapping(make_cfg):
+    cfg = make_cfg()
+    assert cfg["mapper_mode"] == "bundle"
+    assert cfg["explore_repos"] == []
+    assert cfg["repo_domains"] == {}
+    assert cfg["kiro_agent"] is None
+
+
+def test_load_config_rejects_an_unknown_mapper_mode(make_cfg):
+    with pytest.raises(SystemExit):
+        make_cfg(mapper_mode="telepathy")
+
+
 def test_config_extends_the_generic_identifier_stoplist(make_cfg):
     cfg = make_cfg(generic_identifiers=["Orders"])
     assert "orders" in cfg["generic_identifiers"]
@@ -196,12 +209,14 @@ def test_generate_writes_the_map_the_graph_and_the_docs(make_repo, make_cfg, mon
     assert (ad / "index.md").exists()
 
 
-def test_generate_reports_a_failed_repo_and_keeps_the_others(make_repo, make_cfg, monkeypatch, capsys):
+def test_generate_reports_a_failed_repo_and_keeps_the_others(
+    make_repo, make_cfg, monkeypatch, capsys
+):
     make_repo("good")
     make_repo("bad")
     cfg = make_cfg()
 
-    def flaky(cfg_, repo, prompt, log):
+    def flaky(cfg_, repo, prompt, log, mapper="explore"):
         if repo.name == "bad":
             raise RuntimeError("kiro exploded")
         return _stub_manifest()
@@ -276,7 +291,9 @@ def test_status_reports_fresh_entries_and_orphans(make_repo, make_cfg, make_mani
     assert "gone: orphan" in out
 
 
-def test_status_reports_a_manifest_with_incomplete_metadata(make_repo, make_cfg, make_manifest, capsys):
+def test_status_reports_a_manifest_with_incomplete_metadata(
+    make_repo, make_cfg, make_manifest, capsys
+):
     make_repo("live")
     cfg = make_cfg()
     make_manifest(cfg, "live", _meta={"commit": "a" * 40})

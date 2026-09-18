@@ -12,10 +12,17 @@ def isolated_git(monkeypatch):
     """The fixtures below make throwaway commits with plain messages such as "init". A
     developer's global git config can reject those (a commit-msg hook, required signing) and
     fail the suite for reasons that have nothing to do with atlas, so point every git
-    subprocess the tests spawn at an empty config."""
+    subprocess the tests spawn at an empty config.
+
+    core.excludesFile needs its own override: git falls back to ~/.config/git/ignore by path,
+    not through the global config, so emptying the config alone still lets a developer's
+    personal ignore rules (commonly `.env.*`) silently drop fixture files from a commit."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", os.devnull)
 
 
 def _git(repo, *args):
@@ -102,7 +109,11 @@ def make_manifest(tmp_path):
 @pytest.fixture
 def graph_of(make_cfg):
     def build(cfg, known=None):
-        names = known if known is not None else {p.stem for p in (cfg["atlas_dir"] / "repos").glob("*.json")}
+        names = (
+            known
+            if known is not None
+            else {p.stem for p in (cfg["atlas_dir"] / "repos").glob("*.json")}
+        )
         atlas.build(cfg, set(names))
         return json.loads((cfg["atlas_dir"] / "graph.json").read_text())
 

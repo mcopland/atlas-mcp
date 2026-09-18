@@ -16,7 +16,11 @@ def test_extract_packages_reads_every_ecosystem(tmp_path):
         tmp_path,
         {
             "package.json": json.dumps(
-                {"name": "@org/web", "dependencies": {"react": "^18"}, "devDependencies": {"jest": "^29"}}
+                {
+                    "name": "@org/web",
+                    "dependencies": {"react": "^18"},
+                    "devDependencies": {"jest": "^29"},
+                }
             ),
             "svc/go.mod": "module github.com/org/svc\n\nrequire (\n\tgithub.com/org/lib v1.2.3 // c\n)\n",
             "lib/pyproject.toml": '[project]\nname = "Org_Lib"\ndependencies = ["requests>=2", "boto3"]\n',
@@ -146,4 +150,6 @@ def test_maven_child_module_inherits_the_parent_group(tmp_path):
         },
     )
     got = atlas.extract_packages(tmp_path)
-    assert {(p["ecosystem"], p["name"]) for p in got["publishes"]} == {("maven", "com.org:orders-api")}
+    assert {(p["ecosystem"], p["name"]) for p in got["publishes"]} == {
+        ("maven", "com.org:orders-api")
+    }

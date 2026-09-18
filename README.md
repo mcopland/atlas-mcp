@@ -1,6 +1,8 @@
 # Org atlas for Kiro CLI
 
-Maps every repo with headless Kiro (Haiku), joins the results into one dependency graph, and serves it to Kiro through a local MCP server. Everything lives in your home directory. Nothing is committed to any repo.
+Maps every repo with headless Kiro (Haiku), joins the results into one dependency graph, and serves it
+to Kiro through a local MCP server. Everything lives in your home directory. Nothing is committed to
+any repo, and secrets are stripped from repo content before it reaches the model.
 
 ```
 atlas-mcp/   this kit (code, prompts, config)
@@ -25,7 +27,7 @@ cd ~/atlas-mcp
 cp config.example.json config.json
 uv run --locked --script atlas_mcp.py < /dev/null   # warm the dependency cache once
 kiro-cli chat --list-models          # confirm the Haiku model id, put it in config.json "model"
-mkdir -p ~/.kiro/agents && cp kiro/agents/atlas-mapper.json ~/.kiro/agents/
+mkdir -p ~/.kiro/agents && cp kiro/agents/atlas-bundle.json kiro/agents/atlas-mapper.json ~/.kiro/agents/
 ```
 
 That warm-up matters: `atlas_mcp.py.lock` pins `mcp` and its 29 transitive dependencies by
@@ -36,22 +38,63 @@ Edit `config.json`:
 
 - `repo_roots`: folders containing clones (scanned 2 levels deep). `repos`: extra individual paths. `exclude_repos`: names to skip (matches either the resolved atlas name or the directory basename).
 - `kiro_bin`: absolute path from `which kiro-cli` (cron has a minimal PATH).
-- `kiro_agent`: agent passed as `--agent`, default `atlas-mapper` (installed above). Keep it; see Troubleshooting for why. Set it to `""` to use Kiro's default agent.
+- `mapper_mode`: `bundle` (default) or `explore`. See "How repos get mapped" below.
+- `explore_repos`: names forced back to `explore` when `mapper_mode` is `bundle`. Use it for the
+  handful of repos the bundle does not describe well.
+- `kiro_agent`: agent passed as `--agent`. Leave it `null` and each repo gets the agent matching its
+  mapper mode (`atlas-bundle` or `atlas-mapper`, both installed above). Keep that; see Troubleshooting
+  for why. Set it to `""` to use Kiro's default agent.
 - `domains`: fixed list like `["payments", "identity", "platform"]`. Strongly recommended; without it the model invents inconsistent domain names. Anything off the list is forced to `unassigned` and recorded in the manifest's `_meta.domain_rejected`.
+- `repo_domains`: pin a domain deterministically, `{"orders-*": "payments"}`. Globs match the atlas
+  name, first match wins, and a pin always beats the model. `_meta.domain_source` records which one
+  decided. Use it wherever domain membership is a fact you already know.
 - `parallel`: concurrent Kiro sessions. Start at 3.
 - `repo_names`: pin a name for a clone, `{"/abs/path/to/clone": "orders-service"}`. Needed only if you want a name that differs from the directory, or want it stable regardless of what else gets cloned.
 - `generic_identifiers`: extra names that must never act as a weak alias (added to a built-in list of `api`, `db`, `gateway`, and similar). Use this when one repo claims a name so generic it starts matching half the org.
 - `max_ambiguous_hits`: if a weak (alias or env-var) match lands on more than this many repos, no edge is created; the consume becomes `unresolved` with a `candidates` shortlist instead. Default 3.
-- `ignore_changes`: glob patterns whose changes cannot affect the entry, so a commit touching only those restamps instead of spending credits. It defaults to a built-in list covering tests, docs, images and editor config, which is what the table in section 5 assumes. Set it to override that list, or to `[]` to disable restamping entirely.
+- `ignore_changes`: glob patterns whose changes cannot affect the entry, so a commit touching only those restamps instead of spending credits. It defaults to a built-in list covering tests, docs, images and editor config, which is what the table in section 6 assumes. Set it to override that list, or to `[]` to disable restamping entirely.
 
-## 3. Pilot, then full run
+## 3. How repos get mapped
+
+Two modes, chosen by `mapper_mode`.
+
+**`bundle` (default).** `atlas.py` reads the repo itself and assembles a deterministic context
+bundle: a file tree, excerpts of the files that describe a repo (README, CODEOWNERS, build
+manifests, Dockerfile and compose, k8s and Helm, Terraform, env examples, OpenAPI, proto, GraphQL,
+entrypoints), and the source lines that name other systems (URLs, env-var targets, topics and
+queues, datastore connections, client constructors). Kiro then gets one call, with no tools at
+all, to turn that bundle into the entry. One model call per repo, no tool loop, so there is no
+approval prompt to hang on and the spend is a fraction of exploring.
+
+The bundle is capped at the argv budget: the tree gets up to 10% of it, key files up to 70%
+cumulative, and the rest is reserved for signal lines so a monorepo full of manifests cannot
+starve the part that feeds the graph join.
+
+**`explore`.** The original behaviour: Kiro explores the repo with its read tool and decides what
+to look at. Slower and more expensive, but it can follow a trail the bundle missed. Put individual
+repos in `explore_repos` to use it for them alone.
+
+Both modes redact before the model sees anything: assignments to secret-looking keys, credentials
+inside URLs, and long opaque quoted literals become `<redacted>`. The prompts tell the model never
+to copy a secret value into an entry. Redaction is a safety net over the fact that the bundle
+prefers `.env.example` over `.env`, not a licence to point the mapper at a repo full of live keys.
+
+Both modes record the prompt hash they were generated with. Editing a prompt or the schema
+therefore regenerates every entry in full on the next run, rather than leaving a mix of old and
+new shapes in the atlas until the 30-day full regeneration comes round.
+
+## 4. Pilot, then full run
 
 ```bash
 uv run --script atlas.py generate --dry-run          # spends nothing
 uv run --script atlas.py generate --only a b c       # a representative mix
 ```
 
-Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`:
+Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`. This pilot is also
+how you judge whether the bundle is enough for your repos: if an entry is thin or its consumes are
+missing, rerun that repo with `explore_repos` set and compare `_meta.dropped_without_evidence` and
+the `unresolved` count between the two.
+
 
 - `uv run --script atlas.py unresolved --top 25` groups every unmatched consume by target. This is the fastest way to see what the join is missing. Entries with `candidates=` were deliberately not linked because the match was weak and ambiguous.
 - Many `unresolved` consumes that are really internal: the provider repo is missing that name in `identifiers`. Rerun it with `--only NAME --full`.
@@ -59,7 +102,7 @@ Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`:
 
 Then run everything: `uv run --script atlas.py generate`.
 
-## 4. Connect Kiro
+## 5. Connect Kiro
 
 Copy `kiro/steering/atlas.md` to `~/.kiro/steering/atlas.md`, then pick one of the two
 registrations below. Do not do both: each one registers a server named `atlas`.
@@ -83,7 +126,7 @@ repo ([kirodotdev/Kiro#8121](https://github.com/kirodotdev/Kiro/issues/8121),
 [aws/amazon-q-developer-cli#3719](https://github.com/aws/amazon-q-developer-cli/issues/3719)).
 An agent that lists the file as a resource loads it either way.
 
-## 5. Keep it current
+## 6. Keep it current
 
 `generate` only spends credits where needed:
 
@@ -100,7 +143,7 @@ Schedule it, for example every 6 hours with cron. Spell out the path to `uv` fro
 0 */6 * * * cd $HOME/atlas-mcp && $HOME/.local/bin/uv run --script atlas.py generate --pull >> $HOME/atlas/cron.log 2>&1
 ```
 
-**Pick an interval longer than a full run.** A first run over 100 repos can take `repos / parallel * timeout_minutes` in the worst case (roughly 11 hours at the defaults), so a 2-hour cron would start stacking runs. A lock file (`atlas/.generate.lock`) makes a second run exit immediately rather than double-spend credits, so a short interval is safe but pointless. `--dry-run` does not take the lock, so you can always see what is queued while a real run is in flight. Where `flock` is unavailable, clear a lock left by a killed process with `--force-unlock`.
+**Pick an interval longer than a full run.** The worst case is `repos / parallel * timeout_minutes`, roughly 11 hours over 100 repos at the defaults. That bound belongs to `explore` mode, where a session can sit at the timeout; a `bundle` run is one call per repo and finishes far inside it. Size the interval for the worst case anyway, because a stuck session is exactly when it matters. A lock file (`atlas/.generate.lock`) makes a second run exit immediately rather than double-spend credits, so a short interval is safe but pointless. `--dry-run` does not take the lock, so you can always see what is queued while a real run is in flight. Where `flock` is unavailable, clear a lock left by a killed process with `--force-unlock`.
 
 `atlas.py status` shows which entries are stale, plus any orphans. The MCP `freshness` tool gives Kiro the same view.
 
@@ -111,9 +154,9 @@ Schedule it, for example every 6 hours with cron. Spell out the path to `uv` fro
 
 ## Troubleshooting
 
-- **Timeouts:** almost always a tool call waiting for approval in headless mode. Check `atlas/logs/NAME.log`, which keeps one section per attempt. Reading inside the repo is allowed by default in v3; if the model insists on other tools, pass a narrow trust flag via `kiro_extra_args` (see `kiro-cli chat --help` for `--trust-tools`), never `--trust-all-tools`.
+- **Timeouts:** in `explore` mode, almost always a tool call waiting for approval in headless mode. `bundle` mode has no tools to approve, so a timeout there is the model or the network. Check `atlas/logs/NAME.log`, which keeps one section per attempt. Reading inside the repo is allowed by default in v3; if the model insists on other tools, pass a narrow trust flag via `kiro_extra_args` (see `kiro-cli chat --help` for `--trust-tools`), never `--trust-all-tools`.
 - **"no `<<<ATLAS_JSON` block":** the model did not finish or ignored the format. It retries once; both attempts are in the log. Runs pass `--wrap never` so a long JSON line is never hard-wrapped into invalid JSON; if the log shows an unrecognized `--wrap` argument, upgrade to Kiro CLI v3. Adding `--output-format stream-json` (plus the `--engine` it requires) to `kiro_extra_args` also works, because the parser falls back to reading the string leaves of a JSON Lines transcript, but that path has not been run against a live CLI.
-- **Mapping runs go through the `atlas-mapper` agent.** Without it, `kiro-cli` maps each repo under that repo's own workspace configuration, which means starting whatever MCP servers and hooks the repo declares, unattended, with your environment and `KIRO_API_KEY`. The shipped agent sets `includeMcpJson: false`, no MCP servers, and read-only tools. Kiro still inherits default resources such as workspace steering unless you set `chat.disableInheritingDefaultResources`; that is text in the prompt, not code that runs.
+- **Mapping runs go through a dedicated agent.** Without one, `kiro-cli` maps each repo under that repo's own workspace configuration, which means starting whatever MCP servers and hooks the repo declares, unattended, with your environment and `KIRO_API_KEY`. `atlas-mapper` (explore mode) sets `includeMcpJson: false`, no MCP servers, and read-only tools. `atlas-bundle` (bundle mode) declares no tools at all, and its session runs from `atlas_dir` rather than inside the mapped repo, so none of that repo's configuration is loaded in the first place. Kiro still inherits default resources such as workspace steering unless you set `chat.disableInheritingDefaultResources`; that is text in the prompt, not code that runs.
 - **Matching is string-based.** Consumes are matched to providers by hostname, service name, topic, package name, or owned datastore name. Each edge carries a `match` tier: `exact` (literal identifier or host), `alias` (the first label of a hostname), `envvar` (derived from an env var name such as `ORDERS_SERVICE_URL` -> `orders-service`), or `ambiguous` (more than one candidate). Treat anything but `exact` as a lead and check the evidence path. An identifier containing a `/` but no scheme (a Go module path, a scoped npm name) is indexed as a package name rather than a hostname, so `github.com/org/a` never makes its repo answer for `github.com`. More candidates than `max_ambiguous_hits` leaves the consume unresolved with a shortlist, except for topics and queues, where several producers of one name are normal and each of those edges keeps the tier it matched at rather than being demoted to `ambiguous`.
 - **A repo is huge and updates keep regenerating in full.** Update prompts are capped at 96 KB; past that the run falls back to a full regeneration rather than truncating the entry. Reduce `max_changed_files_for_update` if you would rather cap the changed-file list.
 
@@ -135,6 +178,6 @@ Two lockfiles, with different jobs:
   `--locked`.
 - `uv.lock` pins the dev toolchain so the test suite is reproducible.
 
-The tests cover the deterministic core with no Kiro calls and no credits spent: discovery and naming, package extraction for npm, Go, Python, Maven, Gradle, Cargo and NuGet, evidence gating, manifest normalisation, the graph join and its match tiers, the lock, `generate` end to end, every MCP tool, and the server answering over stdio.
+The tests cover the deterministic core with no Kiro calls and no credits spent: discovery and naming, package extraction for npm, Go, Python, Maven, Gradle, Cargo and NuGet, secret redaction, the context bundle and its budget, evidence gating, manifest normalisation, the graph join and its match tiers, the lock, `generate` end to end in both mapper modes, every MCP tool, and the server answering over stdio.
 
 To move to a newer `mcp`, edit the pin in the `# /// script` block at the top of `atlas_mcp.py`, run `uv lock --script atlas_mcp.py`, and commit the regenerated lockfile. The server imports either `mcp` 1.x or 2.x, so the pin is for reproducibility in unattended runs rather than compatibility, though only the pinned 2.x is exercised by the tests.

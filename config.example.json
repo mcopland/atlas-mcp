@@ -8,7 +8,9 @@
   "repo_names": {},
   "kiro_bin": "kiro-cli",
   "model": "claude-haiku-4.5",
-  "kiro_agent": "atlas-mapper",
+  "mapper_mode": "bundle",
+  "explore_repos": [],
+  "kiro_agent": null,
   "kiro_extra_args": [],
   "parallel": 3,
   "timeout_minutes": 20,
@@ -16,5 +18,6 @@
   "max_changed_files_for_update": 150,
   "max_ambiguous_hits": 3,
   "domains": [],
+  "repo_domains": {},
   "generic_identifiers": []
 }

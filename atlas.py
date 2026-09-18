@@ -27,6 +27,7 @@ import concurrent.futures as cf
 import contextlib
 import datetime as dt
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -45,7 +46,16 @@ except ImportError:  # non-POSIX: fall back to an O_EXCL lock file
 KIT = Path(__file__).resolve().parent
 START, END = "<<<ATLAS_JSON", "ATLAS_JSON>>>"
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-SKIP_DIRS = {"node_modules", "vendor", "dist", "build", "target", "venv", "__pycache__", "site-packages"}
+SKIP_DIRS = {
+    "node_modules",
+    "vendor",
+    "dist",
+    "build",
+    "target",
+    "venv",
+    "__pycache__",
+    "site-packages",
+}
 FAMILY = {
     "http": "svc",
     "grpc": "svc",
@@ -101,10 +111,22 @@ GRADLE_DEP = re.compile(
     r"""\b(?:implementation|api|compile|compileOnly|runtimeOnly
                         |testImplementation|testCompileOnly|annotationProcessor|kapt)
                         \b[\s(]+['"]([^'":\s]+):([^'":\s]+)""",
-    re.X,
+    re.VERBOSE,
 )
 MAX_PROMPT_BYTES = 96 * 1024
 TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
+PROMPTS = {"explore": ("full.md", "update.md"), "bundle": ("bundle_full.md", "bundle_update.md")}
+DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle"}
+BUNDLE_MARGIN_BYTES = 2 * 1024
+SECRET_ASSIGNMENT = re.compile(
+    r"""^(\s*(?:export\s+)?["']?[\w.\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)
+        [\w.\-]*["']?\s*[=:]\s*)(\S.*)$""",
+    re.IGNORECASE | re.MULTILINE | re.VERBOSE,
+)
+# Anchored on the literal "://" so the scan can skip ahead: a leading `\w[\w+.\-]*` would
+# start at every character of a long token and backtrack, which is quadratic on minified files.
+URL_CREDENTIALS = re.compile(r"://[^/\s@:]+:[^/\s@]*@")
+OPAQUE_LITERAL = re.compile(r"""(?<=["'])[A-Za-z0-9_\-]{32,}(?=["'])""")
 
 
 # ---------- helpers ----------
@@ -163,7 +185,9 @@ def load_config(path):
         "kiro_bin": "kiro-cli",
         "model": "claude-haiku-4.5",
         "kiro_extra_args": [],
-        "kiro_agent": "atlas-mapper",
+        "mapper_mode": "bundle",
+        "explore_repos": [],
+        "repo_domains": {},
         "parallel": 3,
         "timeout_minutes": 20,
         "full_regen_days": 30,
@@ -175,14 +199,26 @@ def load_config(path):
     }
     for k, v in defaults.items():
         cfg.setdefault(k, v)
-    cfg["generic_identifiers"] = {str(s).strip().lower() for s in cfg["generic_identifiers"]} | GENERIC_IDENTIFIERS
+    if cfg["mapper_mode"] not in PROMPTS:
+        sys.exit(
+            f"unknown mapper_mode {cfg['mapper_mode']!r}; expected one of {', '.join(sorted(PROMPTS))}"
+        )
+    # None means "pick the agent that matches each repo's mapper mode"; "" means "pass no --agent".
+    cfg.setdefault("kiro_agent", None)
+    cfg["generic_identifiers"] = {
+        str(s).strip().lower() for s in cfg["generic_identifiers"]
+    } | GENERIC_IDENTIFIERS
     cfg["domains"] = [str(d).strip().lower() for d in cfg["domains"] if str(d).strip()]
     return cfg
 
 
 def git(repo, *args, timeout=60):
     r = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=timeout,
     )
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
@@ -286,7 +322,9 @@ def discover_repos(cfg):
     found = {}
     for base, members in sorted(groups.items()):
         for path in members:
-            name = aliases.get(str(path)) or (base if len(members) == 1 else f"{path.parent.name}-{base}")
+            name = aliases.get(str(path)) or (
+                base if len(members) == 1 else f"{path.parent.name}-{base}"
+            )
             if name in found:
                 name = re.sub(r"\W+", "-", str(path)).strip("-").lower()
             found[name] = path
@@ -328,7 +366,9 @@ def walk(repo, filenames, max_depth=4):
     for dirpath, dirnames, files in os.walk(repo):
         depth = len(Path(dirpath).relative_to(repo).parts)
         dirnames[:] = (
-            [] if depth >= max_depth else [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+            []
+            if depth >= max_depth
+            else [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
         )
         for f in files:
             if f in filenames or any(fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat):
@@ -389,10 +429,12 @@ def extract_packages(repo):
                     for n in data.get(section) or {}:
                         dep("npm", n, f)
             elif f.name == "go.mod":
-                m = re.search(r"^module\s+(\S+)", text, re.M)
+                m = re.search(r"^module\s+(\S+)", text, re.MULTILINE)
                 pub("go", m and m.group(1), f)
-                block = re.findall(r"^require\s*\((.*?)^\)", text, re.M | re.S)
-                lines = "\n".join(block).splitlines() + re.findall(r"^require\s+([^\s(]+\s+\S+)", text, re.M)
+                block = re.findall(r"^require\s*\((.*?)^\)", text, re.MULTILINE | re.DOTALL)
+                lines = "\n".join(block).splitlines() + re.findall(
+                    r"^require\s+([^\s(]+\s+\S+)", text, re.MULTILINE
+                )
                 for line in lines:
                     parts = line.split("//")[0].split()
                     if len(parts) >= 2:
@@ -416,15 +458,21 @@ def extract_packages(repo):
             elif f.name == "pom.xml":
                 root = ET.fromstring(text)
                 parent = next((c for c in root if local(c) == "parent"), None)
-                group = child_text(root, "groupId") or (child_text(parent, "groupId") if parent is not None else "")
+                group = child_text(root, "groupId") or (
+                    child_text(parent, "groupId") if parent is not None else ""
+                )
                 pub("maven", coord(group, child_text(root, "artifactId")), f)
                 for node in root.iter():
                     if local(node) == "dependency":
-                        dep("maven", coord(child_text(node, "groupId"), child_text(node, "artifactId")), f)
+                        dep(
+                            "maven",
+                            coord(child_text(node, "groupId"), child_text(node, "artifactId")),
+                            f,
+                        )
             elif f.name.startswith("build.gradle"):
                 for m in re.finditer(GRADLE_DEP, text):
                     dep("maven", coord(m.group(1), m.group(2)), f)
-                group = re.search(r"""^\s*group\s*=?\s*['"]([^'"]+)['"]""", text, re.M)
+                group = re.search(r"""^\s*group\s*=?\s*['"]([^'"]+)['"]""", text, re.MULTILINE)
                 root_name = ""
                 for settings in ("settings.gradle", "settings.gradle.kts"):
                     path = f.parent / settings
@@ -474,7 +522,303 @@ def extract_packages(repo):
     return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
 
 
+# ---------- context bundle ----------
+
+BUNDLE_WALK_DEPTH = 4
+BUNDLE_TREE_DEPTH = 3
+BUNDLE_TREE_MAX = 400
+BUNDLE_FILE_BYTES = 12 * 1024
+BUNDLE_README_BYTES = 8 * 1024
+BUNDLE_MAX_FILE_BYTES = 512 * 1024
+BUNDLE_MAX_FILES = 4000
+BUNDLE_SIGNALS_PER_CATEGORY = 60
+BUNDLE_LINE_CHARS = 200
+BUNDLE_DOT_DIRS = {".github"}
+KEY_FILES = (
+    ("README*", "CODEOWNERS", "OWNERS", "catalog-info.y*ml"),
+    (
+        "package.json",
+        "go.mod",
+        "pyproject.toml",
+        "requirements*.txt",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle*",
+        "Cargo.toml",
+        "*.csproj",
+    ),
+    (
+        "Dockerfile*",
+        "docker-compose*.y*ml",
+        "compose*.y*ml",
+        "Chart.yaml",
+        "values*.y*ml",
+        "serverless.y*ml",
+        "*.tf",
+        "Procfile",
+        "app.yaml",
+        "fly.toml",
+        "k8s/*.y*ml",
+        "deploy/*.y*ml",
+        "deployment/*.y*ml",
+        "manifests/*.y*ml",
+        "charts/*.y*ml",
+        "helm/*.y*ml",
+    ),
+    (".env.example", ".env.sample", ".env.template", "env.example"),
+    (
+        "openapi*.yaml",
+        "openapi*.yml",
+        "openapi*.json",
+        "swagger*.yaml",
+        "swagger*.yml",
+        "swagger*.json",
+        "*.proto",
+        "*.graphql",
+        "*.graphqls",
+        "asyncapi*.y*ml",
+    ),
+    (
+        "main.go",
+        "cmd/*/main.go",
+        "main.py",
+        "app.py",
+        "manage.py",
+        "src/main.*",
+        "index.js",
+        "index.ts",
+        "src/index.js",
+        "src/index.ts",
+        "server.js",
+        "server.ts",
+        "Program.cs",
+        "src/main.rs",
+    ),
+)
+SIGNAL_EXTS = {
+    ".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".kt", ".rb", ".cs", ".rs", ".php", ".scala",
+    ".sh", ".yaml", ".yml", ".toml", ".json", ".tf", ".hcl", ".properties", ".conf", ".cfg", ".ini", ".env",
+}  # fmt: skip
+SIGNAL_PATTERNS = {
+    "url": re.compile(r"\bhttps?://(?P<key>[A-Za-z0-9_.\-]+(?::\d+)?)"),
+    "env": re.compile(
+        r"(?i:getenv|environ|process\.env|env::var|getenvironmentvariable|\bENV\b)\W{0,4}(?P<key>[A-Z][A-Z0-9_]{2,})"
+    ),
+    "messaging": re.compile(
+        r"""(?:topic|queue|subscri|publish|kafka|sqs|sns|pubsub|nats)[^"']{0,60}["'](?P<key>[\w.\-/:]{3,})["']""",
+        re.IGNORECASE,
+    ),
+    "datastore": re.compile(
+        r"""(?P<key>(?:postgres|postgresql|mysql|mongodb|redis|dynamodb|elasticsearch|s3)://[^\s"'`,)]+
+            |(?:postgres|postgresql|mysql|mongodb|redis|dynamodb|elasticsearch)[^"']{0,40}["'][^"']{3,}["'])""",
+        re.IGNORECASE | re.VERBOSE,
+    ),
+    "client": re.compile(
+        r"""(?:grpc\.Dial|NewClient|\.Dial\(|baseURL|base_url|BaseUrl)[^"']{0,40}["'](?P<key>[^"']{3,})["']""",
+        re.IGNORECASE,
+    ),
+}
+NOISE_HOSTS = (
+    "localhost", "127.0.0.1", "0.0.0.0", "example.com", "example.org", "w3.org", "json-schema.org",
+    "schema.org", "github.com", "gitlab.com", "npmjs.org", "npmjs.com", "pypi.org", "golang.org",
+    "apache.org", "maven.org", "googleapis.com", "amazonaws.com",
+)  # fmt: skip
+ENV_INTERESTING = (
+    "TOPIC",
+    "QUEUE",
+    "BUCKET",
+    "TABLE",
+    "DB",
+    "DATABASE",
+    "KAFKA",
+    "SQS",
+    "SNS",
+    "REDIS",
+)
+
+
+def bundle_files(repo):
+    """Every candidate path, repo-relative and sorted. `.github` is the one dot-directory worth
+    descending into, because CODEOWNERS often lives there."""
+    out = []
+    for dirpath, dirnames, files in os.walk(repo):
+        rel_dir = Path(dirpath).relative_to(repo)
+        depth = len(rel_dir.parts)
+        dirnames[:] = (
+            []
+            if depth >= BUNDLE_WALK_DEPTH
+            else sorted(
+                d
+                for d in dirnames
+                if d not in SKIP_DIRS and (not d.startswith(".") or d in BUNDLE_DOT_DIRS)
+            )
+        )
+        for f in sorted(files):
+            out.append((rel_dir / f).as_posix())
+            if len(out) >= BUNDLE_MAX_FILES:
+                return sorted(out)
+    return sorted(out)
+
+
+def path_matches(rel, pattern):
+    """A pattern containing a slash is matched against the whole repo-relative path, where
+    fnmatch's `*` also spans separators, so `k8s/*.yaml` reaches nested manifests."""
+    return fnmatch.fnmatch(rel if "/" in pattern else rel.rsplit("/", 1)[-1], pattern)
+
+
+def key_file_group(rel):
+    for i, patterns in enumerate(KEY_FILES):
+        if any(path_matches(rel, p) for p in patterns):
+            return i
+    return None
+
+
+def read_capped(path, cap):
+    """None when the file is too big to be worth reading at all."""
+    try:
+        if path.stat().st_size > BUNDLE_MAX_FILE_BYTES:
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"warn: could not read {path}: {e}", file=sys.stderr)
+        return None
+    text = redact(text)
+    return text[:cap] + "\n... truncated\n" if len(text) > cap else text
+
+
+def excerpt_blocks(repo, paths):
+    ranked = sorted((g, rel) for rel in paths if (g := key_file_group(rel)) is not None)
+    blocks = []
+    for _, rel in ranked:
+        cap = (
+            BUNDLE_README_BYTES
+            if rel.rsplit("/", 1)[-1].startswith("README")
+            else BUNDLE_FILE_BYTES
+        )
+        body = read_capped(repo / rel, cap)
+        if body is not None:
+            blocks.append(f"### {rel}\n{body.rstrip()}\n\n")
+    return blocks
+
+
+def signal_key(category, match):
+    if category != "url":
+        return match.group("key").lower()
+    host = match.group("key").split(":")[0].lower()
+    if any(host == n or host.endswith("." + n) for n in NOISE_HOSTS):
+        return None
+    return host
+
+
+def signal_sections(repo, paths):
+    """One line per distinct target, so a URL repeated in fifty call sites costs one slot."""
+    found = {name: {} for name in SIGNAL_PATTERNS}
+    for rel in paths:
+        # Not Path.suffix: pathlib reports no suffix for a dotfile, which would skip `.env`.
+        if "." + rel.rsplit(".", 1)[-1] not in SIGNAL_EXTS:
+            continue
+        text = read_capped(repo / rel, BUNDLE_MAX_FILE_BYTES)
+        if text is None:
+            continue
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line:
+                continue
+            for category, pattern in SIGNAL_PATTERNS.items():
+                hits = found[category]
+                if len(hits) >= BUNDLE_SIGNALS_PER_CATEGORY:
+                    continue
+                for m in pattern.finditer(line):
+                    key = signal_key(category, m)
+                    if category == "env" and not (
+                        ENV_SUFFIX.search(m.group("key"))
+                        or any(w in m.group("key") for w in ENV_INTERESTING)
+                    ):
+                        continue
+                    if key and key not in hits:
+                        hits[key] = f"{rel}:{lineno}: {line[:BUNDLE_LINE_CHARS]}\n"
+    return [(name, list(hits.values())) for name, hits in found.items() if hits]
+
+
+def fit(blocks, budget):
+    """Priority order is kept: the first block that does not fit ends the section, rather than
+    letting a later small block jump the queue."""
+    out, used = [], 0
+    for b in blocks:
+        size = len(b.encode("utf-8"))
+        if used + size > budget:
+            break
+        out.append(b)
+        used += size
+    return "".join(out)
+
+
+def gather_bundle(repo, budget, only=None):
+    """A deterministic, redacted, budgeted picture of one repo: tree, key files, and the lines
+    that name other systems. Replaces letting the model explore the repo itself."""
+    files = bundle_files(repo)
+    chosen = files if only is None else [f for f in files if f in {str(p) for p in only}]
+
+    shallow = [f for f in files if len(f.split("/")) <= BUNDLE_TREE_DEPTH]
+    tree = [f"- {f}\n" for f in shallow[:BUNDLE_TREE_MAX]]
+    hidden = len(files) - len(tree)
+    if hidden > 0:
+        tree.append(f"... and {hidden} more files\n")
+    text = "## Tree\n" + fit(tree, budget * 10 // 100)
+
+    excerpts = fit(excerpt_blocks(repo, chosen), budget * 70 // 100 - len(text.encode("utf-8")))
+    if excerpts:
+        text += "\n## Files\n" + excerpts
+
+    sections = []
+    for name, lines in signal_sections(repo, chosen):
+        sections.append(f"### {name}\n" + "".join(lines) + "\n")
+    signals = fit(sections, budget - len(text.encode("utf-8")) - len("\n## Signals\n"))
+    if signals:
+        text += "\n## Signals\n" + signals
+    return text
+
+
 # ---------- LLM extraction ----------
+
+
+def redact(text):
+    """Mask secret values before repo content reaches the model or the atlas: assignments to
+    secret-looking keys, credentials embedded in URLs, and long opaque quoted literals."""
+
+    def opaque(m):
+        s = m.group(0)
+        return "<redacted>" if re.search(r"[A-Za-z]", s) and re.search(r"[0-9]", s) else s
+
+    text = SECRET_ASSIGNMENT.sub(r"\g<1><redacted>", text)
+    text = URL_CREDENTIALS.sub("://<redacted>@", text)
+    return OPAQUE_LITERAL.sub(opaque, text)
+
+
+def domain_for(cfg, name):
+    """First matching glob wins, so the config can pin a domain the model keeps getting wrong."""
+    for pattern, domain in (cfg["repo_domains"] or {}).items():
+        if fnmatch.fnmatch(name, str(pattern)):
+            return str(domain).strip().lower()
+    return ""
+
+
+def mapper_prompt(cfg, repo, mapper, template, values, only=None):
+    """In bundle mode the bundle gets whatever the rendered template leaves of the argv budget."""
+    if mapper != "bundle":
+        return build_prompt(cfg, template, **values)
+    shell = build_prompt(cfg, template, BUNDLE="", **values)
+    budget = MAX_PROMPT_BYTES - len(shell.encode("utf-8")) - BUNDLE_MARGIN_BYTES
+    return build_prompt(cfg, template, BUNDLE=gather_bundle(repo, budget, only=only), **values)
+
+
+def prompt_hash(mode):
+    """Changing a prompt or the schema invalidates every manifest made with the old one."""
+    h = hashlib.sha256(mode.encode("utf-8"))
+    for name in (*PROMPTS[mode], "schema.json"):
+        h.update((KIT / "prompts" / name).read_bytes())
+    return h.hexdigest()[:12]
 
 
 def build_prompt(cfg, template, **values):
@@ -482,7 +826,9 @@ def build_prompt(cfg, template, **values):
     values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text(encoding="utf-8"))
     values.setdefault(
         "DOMAINS",
-        ", ".join(cfg["domains"] + ["unassigned"]) if cfg["domains"] else "a short lowercase name of your choice",
+        ", ".join(cfg["domains"] + ["unassigned"])
+        if cfg["domains"]
+        else "a short lowercase name of your choice",
     )
     for k, v in values.items():
         text = text.replace("{{" + k + "}}", v)
@@ -542,8 +888,13 @@ def log_append(log_path, text):
         fh.write(text)
 
 
-def run_kiro(cfg, repo, prompt, log_path):
-    agent = ["--agent", cfg["kiro_agent"]] if cfg["kiro_agent"] else []
+def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
+    name = cfg["kiro_agent"] if cfg["kiro_agent"] is not None else DEFAULT_AGENTS[mapper]
+    agent = ["--agent", name] if name else []
+    # Bundle mode has already read the repo, so it runs outside it: a session started inside a
+    # repo loads that repo's steering, hooks and MCP servers unattended.
+    cwd = cfg["atlas_dir"] if mapper == "bundle" else repo
+    Path(cwd).mkdir(parents=True, exist_ok=True)
     cmd = [
         cfg["kiro_bin"],
         "chat",
@@ -556,13 +907,13 @@ def run_kiro(cfg, repo, prompt, log_path):
         *cfg["kiro_extra_args"],
         prompt,
     ]
-    header = (
-        f"=== attempt {now().isoformat(timespec='seconds')} ===\n$ {' '.join(cmd[:-1])} <prompt {len(prompt)} chars>\n"
-    )
+    stamp = now().isoformat(timespec="seconds")
+    shown = " ".join(cmd[:-1])  # the prompt is the last argument and is logged by length, not text
+    header = f"=== attempt {stamp} ===\n$ {shown} <prompt {len(prompt)} chars>\n"
     try:
         r = subprocess.run(
             cmd,
-            cwd=repo,
+            cwd=cwd,
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,
@@ -570,9 +921,13 @@ def run_kiro(cfg, repo, prompt, log_path):
             env={**os.environ, "NO_COLOR": "1"},
         )
     except subprocess.TimeoutExpired as e:
-        partial = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        partial = (
+            e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        )
         log_append(log_path, header + "TIMEOUT\n" + ANSI.sub("", partial) + "\n")
-        raise RuntimeError("timed out; usually a tool call waiting for approval (see README)") from e
+        raise RuntimeError(
+            "timed out; usually a tool call waiting for approval (see README)"
+        ) from e
     log_append(
         log_path,
         header
@@ -592,7 +947,7 @@ def evidence_ok(repo, evidence):
     if not m:
         return False
     rel = m.group(1)
-    rel = rel[2:] if rel.startswith("./") else rel
+    rel = rel.removeprefix("./")
     target = (repo / rel).resolve()
     return target.exists() and (target == repo or repo in target.parents)
 
@@ -610,7 +965,11 @@ def clean_manifest(m, repo, cfg):
         m[field] = kept
     for field in ("languages", "owners", "identifiers", "entrypoints", "notes"):
         items = m.get(field)
-        m[field] = [str(i) for i in items if not isinstance(i, (dict, list))] if isinstance(items, list) else []
+        m[field] = (
+            [str(i) for i in items if not isinstance(i, (dict, list))]
+            if isinstance(items, list)
+            else []
+        )
     for field in ("components", "component_edges"):
         items = m.get(field)
         m[field] = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
@@ -650,15 +1009,21 @@ def process_repo(cfg, name, repo, args):
     old = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
     meta = (old or {}).get("_meta", {})
     mode, changed = "full", []
+    mapper = "explore" if name in set(cfg["explore_repos"]) else cfg["mapper_mode"]
+    stamp = prompt_hash(mapper)
 
-    if old and not args.full:
+    if old and not args.full and meta.get("prompt_hash") == stamp:
         if meta.get("commit") == head:
             return name, "skip", "up to date"
         full_due = is_full_due(meta.get("last_full_at"), cfg["full_regen_days"])
         if not full_due:
             try:
                 changed = git(repo, "diff", "--name-only", meta["commit"], head).splitlines()
-                relevant = [f for f in changed if not any(fnmatch.fnmatch(f, p) for p in cfg["ignore_changes"])]
+                relevant = [
+                    f
+                    for f in changed
+                    if not any(fnmatch.fnmatch(f, p) for p in cfg["ignore_changes"])
+                ]
                 if not relevant:
                     mode = "restamp"
                 elif len(relevant) <= cfg["max_changed_files_for_update"]:
@@ -672,45 +1037,66 @@ def process_repo(cfg, name, repo, args):
     if mode == "restamp":
         manifest = {k: v for k, v in old.items() if k != "_meta"}
     else:
+        full_template, update_template = PROMPTS[mapper]
         prompt = None
         if mode == "update":
-            prompt = build_prompt(
+            prompt = mapper_prompt(
                 cfg,
-                "update.md",
-                OLD_COMMIT=meta["commit"],
-                NEW_COMMIT=head,
-                CHANGED_FILES="\n".join(f"- {f}" for f in changed),
-                MANIFEST=json.dumps({k: v for k, v in old.items() if k not in ("_meta", "packages")}, indent=2),
+                repo,
+                mapper,
+                update_template,
+                {
+                    "OLD_COMMIT": meta["commit"],
+                    "NEW_COMMIT": head,
+                    "CHANGED_FILES": "\n".join(f"- {f}" for f in changed),
+                    "MANIFEST": json.dumps(
+                        {k: v for k, v in old.items() if k not in ("_meta", "packages")}, indent=2
+                    ),
+                },
+                only=set(changed),
             )
             if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-                print(f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full", file=sys.stderr)
+                print(
+                    f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full",
+                    file=sys.stderr,
+                )
                 mode, changed, prompt = "full", [], None
         if prompt is None:
-            prompt = build_prompt(cfg, "full.md")
+            prompt = mapper_prompt(cfg, repo, mapper, full_template, {})
         log = cfg["atlas_dir"] / "logs" / f"{name}.log"
         try:
-            manifest = run_kiro(cfg, repo, prompt, log)
+            manifest = run_kiro(cfg, repo, prompt, log, mapper)
         except ValueError:
-            manifest = run_kiro(cfg, repo, prompt, log)  # one retry on unparseable output
+            manifest = run_kiro(cfg, repo, prompt, log, mapper)  # one retry on unparseable output
 
     dropped, rejected = clean_manifest(manifest, repo, cfg)
     manifest["name"] = name
+    forced = domain_for(cfg, name)
+    if forced:
+        manifest["domain"] = forced
     manifest["packages"] = extract_packages(repo)
     manifest["_meta"] = {
         "repo_path": str(repo),
         "commit": head,
         "generated_at": now().isoformat(timespec="seconds"),
         "mode": mode,
+        "mapper_mode": mapper,
+        "domain_source": "config" if forced else "model",
         "model": cfg["model"] if mode != "restamp" else meta.get("model"),
-        "last_full_at": now().isoformat(timespec="seconds") if mode == "full" else meta.get("last_full_at"),
+        "last_full_at": now().isoformat(timespec="seconds")
+        if mode == "full"
+        else meta.get("last_full_at"),
         "dropped_without_evidence": dropped,
         "domain_rejected": rejected,
+        "prompt_hash": stamp,
     }
     write_json(out, manifest)
     return (
         name,
         mode,
-        (f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, {len(dropped)} dropped"),
+        (
+            f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, {len(dropped)} dropped"
+        ),
     )
 
 
@@ -754,6 +1140,8 @@ def check_meta(m):
     """Manifests are documented as editable JSON and orphan snapshots get restored by hand,
     so a hand-edited file must be skipped with a warning rather than taking the whole build
     down with a KeyError from render_docs or the graph."""
+    if not isinstance(m, dict):
+        raise ValueError("manifest is not a JSON object")
     meta = m.get("_meta")
     if not isinstance(meta, dict):
         raise ValueError("missing _meta")
@@ -768,7 +1156,7 @@ def load_manifests(ad, known):
         try:
             m = json.loads(p.read_text(encoding="utf-8"))
             check_meta(m)
-        except Exception as e:
+        except (OSError, ValueError) as e:  # JSONDecodeError is a ValueError
             print(f"warn: skipping malformed manifest {p.name}: {e}", file=sys.stderr)
             continue
         if p.stem in known:
@@ -823,7 +1211,10 @@ def build(cfg, known):
                 provide(fam, key, name, "exact")
         for ds in m.get("datastores") or []:
             store = str(ds.get("name") or "").strip().lower()
-            if str(ds.get("access") or "").strip().lower() == "owner" and store not in GENERIC_STORES:
+            if (
+                str(ds.get("access") or "").strip().lower() == "owner"
+                and store not in GENERIC_STORES
+            ):
                 provide("db", store, name, "exact")
         for p in (m.get("packages") or {}).get("publishes", []):
             provide("pkg", f"{p['ecosystem']}:{p['name']}", name, "exact")
@@ -986,9 +1377,9 @@ def render_docs(ad, manifests, graph):
             )
         lines += [] if m.get("consumes") else ["- none found"]
         lines += ["", "## Used by", ""]
-        lines += [f"- {e['from']} via {e['kind']} `{e['key']}` ({e['match']})" for e in in_edges] or [
-            "- no known dependents"
-        ]
+        lines += [
+            f"- {e['from']} via {e['kind']} `{e['key']}` ({e['match']})" for e in in_edges
+        ] or ["- no known dependents"]
         lines += ["", "## Datastores", ""]
         lines += [
             f"- {d.get('kind')} `{d.get('name')}` ({d.get('access')}) ({d.get('evidence')})"
@@ -996,7 +1387,9 @@ def render_docs(ad, manifests, graph):
         ] or ["- none found"]
         if m.get("components"):
             lines += ["", "## Components", ""]
-            lines += [f"- {c.get('name')} `{c.get('path')}`: {c.get('role')}" for c in m["components"]]
+            lines += [
+                f"- {c.get('name')} `{c.get('path')}`: {c.get('role')}" for c in m["components"]
+            ]
             lines += ["", "```mermaid", "flowchart LR"]
             lines += [f'  {mid(c.get("name"))}["{mtext(c.get("name"))}"]' for c in m["components"]]
             lines += [
@@ -1027,9 +1420,13 @@ def render_docs(ad, manifests, graph):
         ]
         lines += [f'    {mid(n)}["{mtext(n)}"]' for n in sorted(members)]
         lines += ["  end"] + [
-            f'  {mid(n)}["{mtext(n)} ({mtext(graph["repos"][n]["domain"])})"]' for n in sorted(outsiders)
+            f'  {mid(n)}["{mtext(n)} ({mtext(graph["repos"][n]["domain"])})"]'
+            for n in sorted(outsiders)
         ]
-        lines += [f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid(b)}" for (a, b), k in sorted(pairs.items())]
+        lines += [
+            f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid(b)}"
+            for (a, b), k in sorted(pairs.items())
+        ]
         lines += ["```", ""] + [f"- {n}: {graph['repos'][n]['summary']}" for n in sorted(members)]
         (staging / "domains" / f"{re.sub(r'[^a-z0-9_-]', '_', domain)}.md").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
@@ -1048,7 +1445,10 @@ def render_docs(ad, manifests, graph):
     for domain, members in sorted(by_domain.items()):
         index += (
             [f"## {domain}", ""]
-            + [f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}" for n in sorted(members)]
+            + [
+                f"- {n} ({graph['repos'][n]['kind']}): {graph['repos'][n]['summary']}"
+                for n in sorted(members)
+            ]
             + [""]
         )
     write_text(ad / "index.md", "\n".join(index) + "\n")
@@ -1076,7 +1476,11 @@ def cmd_generate(cfg, args):
     errors = 0
     # A dry run writes nothing, so make it readable during a real run rather than having it
     # exit with "another atlas run holds ..." exactly when someone wants to see what is queued.
-    lock = contextlib.nullcontext() if args.dry_run else atlas_lock(cfg["atlas_dir"], args.force_unlock)
+    lock = (
+        contextlib.nullcontext()
+        if args.dry_run
+        else atlas_lock(cfg["atlas_dir"], args.force_unlock)
+    )
     with lock:
         if not args.dry_run:
             save_repo_map(cfg, repos)
@@ -1117,7 +1521,11 @@ def cmd_prune(cfg, args):
         print(f"  {p.stem}: {'moved aside' if args.apply else 'orphan'}")
     print(
         f"{len(orphans)} orphans "
-        + (f"moved to {dest}" if args.apply else f"found; rerun with --apply to move them to {dest}")
+        + (
+            f"moved to {dest}"
+            if args.apply
+            else f"found; rerun with --apply to move them to {dest}"
+        )
     )
 
 
@@ -1127,7 +1535,9 @@ def cmd_unresolved(cfg, args):
         sys.exit(f"no graph at {path}; run atlas.py generate")
     groups = {}
     for u in json.loads(path.read_text(encoding="utf-8")).get("unresolved", []):
-        g = groups.setdefault((u.get("kind", ""), u.get("key", "")), {"repos": set(), "candidates": set()})
+        g = groups.setdefault(
+            (u.get("kind", ""), u.get("key", "")), {"repos": set(), "candidates": set()}
+        )
         g["repos"].add(u.get("repo", ""))
         g["candidates"].update(u.get("candidates", []))
     rows = sorted(groups.items(), key=lambda kv: (-len(kv[1]["repos"]), kv[0]))
@@ -1162,13 +1572,17 @@ def cmd_status(cfg, _args):
         except (RuntimeError, subprocess.SubprocessError) as e:
             state = f"error: {e}"
         print(f"  {name}: {state} ({meta['commit'][:8]}, {meta['generated_at']}, {meta['mode']})")
-    orphans = [p.stem for p in sorted((cfg["atlas_dir"] / "repos").glob("*.json")) if p.stem not in repos]
+    orphans = [
+        p.stem for p in sorted((cfg["atlas_dir"] / "repos").glob("*.json")) if p.stem not in repos
+    ]
     for name in orphans:
         print(f"  {name}: orphan (no matching clone; run atlas.py prune)")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--config", default=str(KIT / "config.json"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate")
@@ -1179,7 +1593,9 @@ def main():
     g.add_argument("--dry-run", action="store_true", help="show what would run, spend nothing")
     g.add_argument("--no-build", action="store_true")
     g.add_argument(
-        "--force-unlock", action="store_true", help="clear a stale lock file (not needed where flock is available)"
+        "--force-unlock",
+        action="store_true",
+        help="clear a stale lock file (not needed where flock is available)",
     )
     sub.add_parser("build")
     p = sub.add_parser("prune")

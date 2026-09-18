@@ -81,7 +81,10 @@ def test_clean_manifest_lowercases_repo_and_item_kinds(tmp_path, make_cfg):
 
 
 def test_clean_manifest_drops_structured_entries_from_scalar_lists(tmp_path, make_cfg):
-    m = {"identifiers": ["orders", {"name": "orders"}, 7], "components": [{"name": "api"}, "not-a-component"]}
+    m = {
+        "identifiers": ["orders", {"name": "orders"}, 7],
+        "components": [{"name": "api"}, "not-a-component"],
+    }
     atlas.clean_manifest(m, tmp_path, make_cfg())
     assert m["identifiers"] == ["orders", "7"]
     assert m["components"] == [{"name": "api"}]

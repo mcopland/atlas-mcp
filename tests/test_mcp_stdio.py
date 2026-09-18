@@ -6,12 +6,21 @@ import pytest
 
 pytest.importorskip("mcp", reason="install the mcp package to run the MCP server tests")
 
-import anyio  # noqa: E402
-from mcp import ClientSession, StdioServerParameters  # noqa: E402
-from mcp.client.stdio import stdio_client  # noqa: E402
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 KIT = Path(__file__).resolve().parent.parent
-TOOLS = ["dependencies", "dependents", "find_path", "freshness", "get_doc", "get_repo", "list_repos", "search"]
+TOOLS = [
+    "dependencies",
+    "dependents",
+    "find_path",
+    "freshness",
+    "get_doc",
+    "get_repo",
+    "list_repos",
+    "search",
+]
 
 
 def _text(result):
@@ -69,7 +78,9 @@ def served_atlas(tmp_path):
 def test_server_serves_its_tools_over_stdio(served_atlas):
     async def talk():
         params = StdioServerParameters(
-            command=sys.executable, args=[str(KIT / "atlas_mcp.py")], env={"ATLAS_DIR": str(served_atlas)}
+            command=sys.executable,
+            args=[str(KIT / "atlas_mcp.py")],
+            env={"ATLAS_DIR": str(served_atlas)},
         )
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
             await session.initialize()

@@ -1,0 +1,9 @@
+{
+  "name": "atlas-bundle",
+  "description": "Tool-free agent used by atlas.py to turn one prepared repo bundle into an atlas entry. It reads nothing and runs nothing.",
+  "tools": [],
+  "allowedTools": [],
+  "includeMcpJson": false,
+  "mcpServers": {},
+  "resources": []
+}

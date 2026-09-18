@@ -1,0 +1,336 @@
+import json
+import shutil
+
+import pytest
+
+import atlas
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("DB_PASSWORD=hunter2", "DB_PASSWORD=<redacted>"),
+        ("export API_KEY='abc123'", "export API_KEY=<redacted>"),
+        ("  aws_secret_access_key: AKIAxyz", "  aws_secret_access_key: <redacted>"),
+        ('"token": "abc",', '"token": <redacted>'),
+        ("PRIVATE_KEY_PATH=/etc/key.pem", "PRIVATE_KEY_PATH=<redacted>"),
+        ("SECRET=", "SECRET="),
+        (
+            "postgres://app:s3cret@db.internal:5432/app",
+            "postgres://<redacted>@db.internal:5432/app",
+        ),
+        ('url = "https://user:pw@host/path"', 'url = "https://<redacted>@host/path"'),
+        ('KEY = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"', 'KEY = "<redacted>"'),
+        (
+            "stripe = 'sk_live_" + "51H8xk2eZvKYlo2C0abcdefghijklmnop'",
+            "stripe = '<redacted>'",
+        ),
+        (
+            "ORDERS_SERVICE_URL=http://orders.internal:8080",
+            "ORDERS_SERVICE_URL=http://orders.internal:8080",
+        ),
+        ("PASSWORD_MIN_LENGTH_DOC=see docs", "PASSWORD_MIN_LENGTH_DOC=<redacted>"),
+        (
+            'name = "a-very-long-package-name-with-only-letters-in-it"',
+            'name = "a-very-long-package-name-with-only-letters-in-it"',
+        ),
+        (
+            'mod = "github.com/org/some-module-name-that-is-quite-long-v2"',
+            'mod = "github.com/org/some-module-name-that-is-quite-long-v2"',
+        ),
+        ("plain line of code", "plain line of code"),
+    ],
+)
+def test_redact_masks_secret_values_and_leaves_other_lines_alone(line, expected):
+    assert atlas.redact(line) == expected
+
+
+def test_redact_stays_linear_on_a_long_single_line(monkeypatch):
+    """A minified bundle or a one-line JSON blob is one enormous token. A pattern that can start
+    at every character and backtrack turns that into minutes of CPU per repo."""
+    import time
+
+    text = json.dumps({"x": "y" * 200_000})
+    start = time.monotonic()
+    atlas.redact(text)
+    assert time.monotonic() - start < 2.0
+
+
+def test_redact_handles_multiline_text():
+    text = "A=1\nTOKEN=abc\nB=2\n"
+    assert atlas.redact(text) == "A=1\nTOKEN=<redacted>\nB=2\n"
+
+
+def test_prompt_hash_is_short_hex_and_stable():
+    a, b = atlas.prompt_hash("explore"), atlas.prompt_hash("explore")
+    assert a == b
+    assert len(a) == 12
+    int(a, 16)
+
+
+def test_prompt_hash_changes_when_a_template_changes(tmp_path, monkeypatch):
+    kit = tmp_path / "kit"
+    shutil.copytree(atlas.KIT / "prompts", kit / "prompts")
+    monkeypatch.setattr(atlas, "KIT", kit)
+    before = atlas.prompt_hash("explore")
+    (kit / "prompts" / "update.md").write_text("changed\n", encoding="utf-8")
+    assert atlas.prompt_hash("explore") != before
+
+
+def test_prompt_hash_changes_when_the_schema_changes(tmp_path, monkeypatch):
+    kit = tmp_path / "kit"
+    shutil.copytree(atlas.KIT / "prompts", kit / "prompts")
+    monkeypatch.setattr(atlas, "KIT", kit)
+    before = atlas.prompt_hash("explore")
+    (kit / "prompts" / "schema.json").write_text("{}\n", encoding="utf-8")
+    assert atlas.prompt_hash("explore") != before
+
+
+def test_prompt_hash_rejects_an_unknown_mode():
+    with pytest.raises(KeyError):
+        atlas.prompt_hash("telepathy")
+
+
+BUDGET = 64 * 1024
+
+
+def bundle(repo, budget=BUDGET, only=None):
+    return atlas.gather_bundle(repo, budget, only=only)
+
+
+def test_the_bundle_lists_the_tree_and_skips_vendored_and_dot_directories(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "main.go": "package main",
+            "internal/store/db.go": "package store",
+            "node_modules/left-pad/index.js": "module.exports = 1",
+            ".venv/lib/thing.py": "x = 1",
+        },
+    )
+    text = bundle(repo)
+    assert "main.go" in text
+    assert "internal/store/db.go" in text
+    assert "left-pad" not in text
+    assert ".venv" not in text
+
+
+def test_the_tree_is_capped(make_repo, monkeypatch):
+    files = {f"pkg/f{i}.go": "package pkg" for i in range(30)}
+    repo = make_repo("svc", files=files)
+    monkeypatch.setattr(atlas, "BUNDLE_TREE_MAX", 5)
+    tree = bundle(repo).split("## Files")[0]
+    assert tree.count("\n- ") <= 5
+    assert "more" in tree
+
+
+def test_key_files_appear_in_priority_order(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "README.md": "# svc\nthe orders service",
+            "package.json": '{"name": "@org/svc"}',
+            "Dockerfile": "FROM golang:1.22",
+            ".env.example": "ORDERS_URL=http://orders.internal",
+            "openapi.yaml": "openapi: 3.0.0",
+        },
+    )
+    text = bundle(repo)
+    names = ("README.md", "package.json", "Dockerfile", ".env.example", "openapi.yaml")
+    order = [text.index(f"### {n}") for n in names]
+    assert order == sorted(order)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "README.md",
+        "CODEOWNERS",
+        ".github/CODEOWNERS",
+        "catalog-info.yaml",
+        "go.mod",
+        "pyproject.toml",
+        "pom.xml",
+        "Dockerfile",
+        "docker-compose.yml",
+        "k8s/deployment.yaml",
+        "helm/values.yaml",
+        "main.tf",
+        ".env.example",
+        "openapi.yaml",
+        "api/orders.proto",
+        "schema.graphql",
+        "main.go",
+        "cmd/server/main.go",
+        "src/index.ts",
+    ],
+)
+def test_every_key_file_kind_is_excerpted(make_repo, rel):
+    repo = make_repo("svc", files={rel: "the file body marker"})
+    text = bundle(repo)
+    assert f"### {rel}" in text
+    assert "the file body marker" in text
+
+
+def test_a_source_file_that_is_not_a_key_file_is_not_excerpted(make_repo):
+    repo = make_repo("svc", files={"internal/store/db.go": "package store // body marker"})
+    assert "### internal/store/db.go" not in bundle(repo)
+
+
+def test_an_excerpt_is_capped_per_file(make_repo, monkeypatch):
+    repo = make_repo("svc", files={"main.go": "package main\n" + ("// filler\n" * 4000)})
+    monkeypatch.setattr(atlas, "BUNDLE_FILE_BYTES", 500)
+    body = bundle(repo).split("### main.go\n", 1)[1]
+    assert len(body.split("###")[0].encode()) < 700
+    assert "truncated" in body
+
+
+def test_a_readme_is_capped_more_tightly_than_other_files(make_repo):
+    assert atlas.BUNDLE_README_BYTES < atlas.BUNDLE_FILE_BYTES
+
+
+def test_a_huge_file_is_skipped_entirely(make_repo, monkeypatch):
+    repo = make_repo("svc", files={"main.go": "package main\n" + ("// x\n" * 200_000)})
+    assert (repo / "main.go").stat().st_size > atlas.BUNDLE_MAX_FILE_BYTES
+    assert "### main.go" not in bundle(repo)
+
+
+@pytest.mark.parametrize(
+    "category, line, expected",
+    [
+        ("url", 'u := "https://orders.internal:8080/v1"', "orders.internal"),
+        ("env", 'os.Getenv("ORDERS_SERVICE_URL")', "ORDERS_SERVICE_URL"),
+        ("env", "process.env.PAYMENTS_TOPIC", "PAYMENTS_TOPIC"),
+        ("env", 'os.environ["EVENTS_QUEUE"]', "EVENTS_QUEUE"),
+        ("messaging", 'producer.publish("order.created", payload)', "order.created"),
+        ("messaging", 'kafka.NewReader(Topic: "billing-events")', "billing-events"),
+        ("datastore", 'dsn := "postgres://db.internal:5432/orders"', "db.internal"),
+        ("datastore", 'redis.NewClient(Addr: "cache.internal:6379")', "cache.internal"),
+        ("client", 'grpc.Dial("inventory.internal:443")', "inventory.internal"),
+        ("client", 'baseURL = "https://shipping.internal"', "shipping.internal"),
+    ],
+)
+def test_each_signal_category_finds_its_target(make_repo, category, line, expected):
+    repo = make_repo("svc", files={"internal/client.go": line})
+    section = bundle(repo).split(f"### {category}\n", 1)
+    assert len(section) == 2, f"no {category} section"
+    assert expected in section[1].split("###")[0]
+
+
+def test_signal_lines_carry_the_path_and_line_number(make_repo):
+    repo = make_repo(
+        "svc", files={"internal/client.go": 'package main\n\nu := "https://orders.internal/v1"'}
+    )
+    assert "internal/client.go:3:" in bundle(repo)
+
+
+def test_noisy_hosts_are_not_reported_as_signals(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "internal/client.go": 'a := "https://github.com/org/x"\nb := "http://localhost:3000"\nc := "https://orders.internal"'
+        },
+    )
+    urls = bundle(repo).split("### url\n", 1)[1].split("###")[0]
+    assert "orders.internal" in urls
+    assert "github.com" not in urls
+    assert "localhost" not in urls
+
+
+def test_a_repeated_signal_is_reported_once(make_repo):
+    body = "\n".join(f'call{i} := "https://orders.internal/v1"' for i in range(5))
+    repo = make_repo("svc", files={"internal/client.go": body})
+    urls = bundle(repo).split("### url\n", 1)[1].split("###")[0]
+    assert urls.count("orders.internal") == 1
+
+
+def test_signals_per_category_are_capped(make_repo, monkeypatch):
+    body = "\n".join(f'u{i} := "https://host{i}.internal/v1"' for i in range(40))
+    repo = make_repo("svc", files={"internal/client.go": body})
+    monkeypatch.setattr(atlas, "BUNDLE_SIGNALS_PER_CATEGORY", 5)
+    urls = bundle(repo).split("### url\n", 1)[1].split("###")[0]
+    assert len([ln for ln in urls.splitlines() if ln.strip()]) == 5
+
+
+def test_a_long_signal_line_is_trimmed(make_repo):
+    repo = make_repo(
+        "svc", files={"internal/client.go": 'u := "https://orders.internal" // ' + "x" * 500}
+    )
+    longest = max(len(ln) for ln in bundle(repo).splitlines())
+    assert longest < 400
+
+
+def test_signals_are_not_scanned_in_binary_or_unlisted_extensions(make_repo):
+    repo = make_repo("svc", files={"fixture.bin": 'u := "https://secret-host.internal"'})
+    assert "secret-host.internal" not in bundle(repo)
+
+
+def test_secrets_are_redacted_in_excerpts_and_signals(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            ".env.example": "DB_PASSWORD=hunter2\nORDERS_URL=http://orders.internal",
+            "internal/client.go": 'dsn := "postgres://app:s3cret@db.internal:5432/orders"',
+        },
+    )
+    text = bundle(repo)
+    assert "hunter2" not in text
+    assert "s3cret" not in text
+    assert "<redacted>" in text
+    assert "orders.internal" in text
+    assert "db.internal" in text
+
+
+def test_only_restricts_excerpts_and_signals_to_the_named_files(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "main.go": 'package main // u := "https://old.internal"',
+            "internal/client.go": 'u := "https://changed.internal"',
+        },
+    )
+    text = bundle(repo, only={"internal/client.go"})
+    assert "changed.internal" in text
+    assert "old.internal" not in text
+    assert "### main.go" not in text
+
+
+def test_an_empty_only_set_yields_no_excerpts_or_signals(make_repo):
+    repo = make_repo("svc", files={"main.go": 'package main // u := "https://old.internal"'})
+    text = bundle(repo, only=set())
+    assert "old.internal" not in text
+    assert "## Tree" in text
+
+
+def test_the_bundle_never_exceeds_its_budget(make_repo):
+    files = {
+        f"pkg{i}/package.json": json.dumps({"name": f"p{i}", "x": "y" * 3000}) for i in range(40)
+    }
+    files["internal/client.go"] = "\n".join(
+        f'u{i} := "https://host{i}.internal"' for i in range(200)
+    )
+    repo = make_repo("svc", files=files)
+    for budget in (600, 4000, 20_000):
+        assert len(bundle(repo, budget=budget).encode()) <= budget
+
+
+def test_signals_still_get_budget_when_key_files_are_huge(make_repo):
+    files = {
+        f"pkg{i}/package.json": json.dumps({"name": f"p{i}", "x": "y" * 8000}) for i in range(30)
+    }
+    files["internal/client.go"] = 'u := "https://orders.internal"'
+    repo = make_repo("svc", files=files)
+    assert "orders.internal" in bundle(repo, budget=40_000)
+
+
+def test_the_bundle_is_deterministic(make_repo):
+    repo = make_repo(
+        "svc",
+        files={
+            "README.md": "# svc",
+            "package.json": '{"name": "svc"}',
+            "internal/a.go": 'u := "https://a.internal"',
+            "internal/b.go": 'u := "https://b.internal"',
+        },
+    )
+    assert bundle(repo) == bundle(repo)

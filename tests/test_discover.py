@@ -45,7 +45,10 @@ def test_exclude_repos_matches_resolved_name_or_basename(make_repo, make_cfg):
     make_repo("team-b/svc")
     make_repo("solo")
     assert set(atlas.discover_repos(make_cfg(exclude_repos=["svc"]))) == {"solo"}
-    assert set(atlas.discover_repos(make_cfg(exclude_repos=["team-a-svc"]))) == {"team-b-svc", "solo"}
+    assert set(atlas.discover_repos(make_cfg(exclude_repos=["team-a-svc"]))) == {
+        "team-b-svc",
+        "solo",
+    }
 
 
 def test_directories_without_git_are_ignored(make_repo, make_cfg, tmp_path):

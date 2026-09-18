@@ -42,7 +42,9 @@ class Store:
     def manifest(self, name: str) -> dict[str, Any]:
         if name not in self.manifests:
             path = ATLAS / "repos" / f"{name}.json"
-            self.manifests[name] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            self.manifests[name] = (
+                json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            )
         return self.manifests[name]
 
 
@@ -58,19 +60,31 @@ def resolve(name: str) -> tuple[str | None, dict[str, Any] | None]:
     exact = [n for n in repos if n.lower() == q]
     if exact:
         return exact[0], None
-    by_ident = [n for n, r in repos.items() if q in (str(i).lower() for i in r.get("identifiers", []))]
+    by_ident = [
+        n for n, r in repos.items() if q in (str(i).lower() for i in r.get("identifiers", []))
+    ]
     if len(by_ident) == 1:
         return by_ident[0], None
     if len(by_ident) > 1:  # several repos claim it; a name substring would be a guess
-        return None, {"error": f"'{name}' is claimed by several repos", "candidates": sorted(by_ident)[:15]}
+        return None, {
+            "error": f"'{name}' is claimed by several repos",
+            "candidates": sorted(by_ident)[:15],
+        }
     partial = [n for n in repos if q in n.lower()]
     if len(partial) == 1:
         return partial[0], None
-    return None, {"error": f"no unique repo matches '{name}'", "candidates": sorted(set(by_ident + partial))[:15]}
+    return None, {
+        "error": f"no unique repo matches '{name}'",
+        "candidates": sorted(set(by_ident + partial))[:15],
+    }
 
 
 def edge_view(e):
-    return {k: e[k] for k in ("from", "to", "kind", "key", "name", "detail", "evidence", "match") if e.get(k)}
+    return {
+        k: e[k]
+        for k in ("from", "to", "kind", "key", "name", "detail", "evidence", "match")
+        if e.get(k)
+    }
 
 
 def out(obj):
@@ -103,7 +117,9 @@ def get_repo(name: str) -> str:
     g = store.load()
     m = dict(store.manifest(repo))
     meta = m.pop("_meta", {})
-    m.pop("packages", None)  # deterministic package lists are summarized by depends_on/used_by edges
+    m.pop(
+        "packages", None
+    )  # deterministic package lists are summarized by depends_on/used_by edges
     return out(
         {
             **m,
@@ -126,7 +142,11 @@ def dependents(name: str, kind: str = "") -> str:
     repo, err = resolve(name)
     if repo is None:
         return out(err)
-    edges = [edge_view(e) for e in store.load()["edges"] if e["to"] == repo and (not kind or e["kind"] == kind)]
+    edges = [
+        edge_view(e)
+        for e in store.load()["edges"]
+        if e["to"] == repo and (not kind or e["kind"] == kind)
+    ]
     return out({"repo": repo, "count": len(edges), "dependents": edges})
 
 
@@ -138,8 +158,12 @@ def dependencies(name: str, kind: str = "") -> str:
     if repo is None:
         return out(err)
     g = store.load()
-    edges = [edge_view(e) for e in g["edges"] if e["from"] == repo and (not kind or e["kind"] == kind)]
-    unresolved = [u for u in g["unresolved"] if u["repo"] == repo and (not kind or u["kind"] == kind)]
+    edges = [
+        edge_view(e) for e in g["edges"] if e["from"] == repo and (not kind or e["kind"] == kind)
+    ]
+    unresolved = [
+        u for u in g["unresolved"] if u["repo"] == repo and (not kind or u["kind"] == kind)
+    ]
     return out({"repo": repo, "dependencies": edges, "unresolved": unresolved})
 
 
@@ -169,13 +193,17 @@ def find_path(source: str, target: str, max_hops: int = 6) -> str:
                 while (step := prev[node]) is not None:
                     node, e = step
                     hops.append(edge_view(e))
-                return out({"source": a, "target": b, "directed": directed, "hops": list(reversed(hops))})
+                return out(
+                    {"source": a, "target": b, "directed": directed, "hops": list(reversed(hops))}
+                )
             if depth < max_hops:
                 for nxt, e in adj.get(node, []):
                     if nxt not in prev:
                         prev[nxt] = (node, e)
                         queue.append((nxt, depth + 1))
-    return out({"source": a, "target": b, "hops": [], "message": f"no connection within {max_hops} hops"})
+    return out(
+        {"source": a, "target": b, "hops": [], "message": f"no connection within {max_hops} hops"}
+    )
 
 
 def _blobs():
@@ -194,11 +222,16 @@ def _blobs():
                 (3, text(m.get("exposes", []))),  # owners outrank callers
                 (2, text(m.get("datastores", []))),
                 (1, text(m.get("consumes", []))),
-                (2, " ".join(p["name"] for p in m.get("packages", {}).get("publishes", [])).lower()),
+                (
+                    2,
+                    " ".join(p["name"] for p in m.get("packages", {}).get("publishes", [])).lower(),
+                ),
                 (
                     1,
                     (
-                        m.get("overview", "") + " " + " ".join(c.get("role", "") for c in m.get("components", []))
+                        m.get("overview", "")
+                        + " "
+                        + " ".join(c.get("role", "") for c in m.get("components", []))
                     ).lower(),
                 ),
             ]
@@ -224,7 +257,9 @@ def search(query: str, limit: int = 10) -> str:
                 for i in m.get(f, [])
                 if any(t in f"{i.get('name', '')} {i.get('key', '')}".lower() for t in terms)
             ][:5]
-            results.append({"repo": n, "score": score, "summary": m.get("summary", ""), "matches": matches})
+            results.append(
+                {"repo": n, "score": score, "summary": m.get("summary", ""), "matches": matches}
+            )
     results.sort(key=lambda r: -r["score"])
     return out({"results": results[:limit]})
 
@@ -262,7 +297,14 @@ def freshness(name: str = "") -> str:
                 row.update(status="stale", head=head[:12])
                 if name:  # one repo asked about: a second call per repo is affordable
                     behind = subprocess.run(
-                        ["git", "-C", r["repo_path"], "rev-list", "--count", f"{r['commit']}..HEAD"],
+                        [
+                            "git",
+                            "-C",
+                            r["repo_path"],
+                            "rev-list",
+                            "--count",
+                            f"{r['commit']}..HEAD",
+                        ],
                         capture_output=True,
                         text=True,
                         stdin=subprocess.DEVNULL,
