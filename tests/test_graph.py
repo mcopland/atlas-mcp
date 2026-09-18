@@ -515,3 +515,52 @@ def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, 
     g = graph_of(cfg, known={"good", "partial"})
     assert set(g["repos"]) == {"good"}
     assert "partial" in capsys.readouterr().err
+
+
+def test_a_deterministic_identifier_resolves_a_consume_the_model_left_hanging(
+    make_cfg, make_manifest, graph_of
+):
+    """The provider side of the join is what deterministic extraction is for: without the
+    Kubernetes service name, "orders-api" matches nothing and the consume goes unresolved."""
+    cfg = make_cfg()
+    make_manifest(cfg, "orders")
+    make_manifest(
+        cfg,
+        "web",
+        consumes=[{"kind": "http", "name": "orders", "key": "orders-api", "evidence": ev()}],
+    )
+    assert graph_of(cfg)["unresolved"][0]["key"] == "orders-api"
+
+    make_manifest(cfg, "orders", identifiers=["orders-api"])
+    g = graph_of(cfg)
+    assert [(e["from"], e["to"], e["match"]) for e in g["edges"]] == [("web", "orders", "exact")]
+    assert g["unresolved"] == []
+
+
+def test_a_terraform_queue_expose_matches_a_consumer_of_that_queue(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    make_manifest(
+        cfg,
+        "orders",
+        exposes=[
+            {
+                "kind": "queue",
+                "name": "orders-events",
+                "key": "orders-events",
+                "evidence": "main.tf:2",
+                "source": "deterministic",
+            }
+        ],
+    )
+    make_manifest(
+        cfg,
+        "billing",
+        consumes=[
+            {"kind": "queue", "name": "orders", "key": "orders-events", "evidence": ev("b.go")}
+        ],
+    )
+    assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [
+        ("billing", "orders", "exact")
+    ]

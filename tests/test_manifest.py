@@ -90,6 +90,26 @@ def test_clean_manifest_drops_structured_entries_from_scalar_lists(tmp_path, mak
     assert m["components"] == [{"name": "api"}]
 
 
+def test_clean_manifest_keeps_the_deterministic_source_marker(tmp_path, make_cfg):
+    (tmp_path / "ok.go").write_text("x")
+    m = {"exposes": [{"kind": "http", "key": "a", "evidence": "ok.go", "source": "deterministic"}]}
+    atlas.clean_manifest(m, tmp_path, make_cfg())
+    assert m["exposes"][0]["source"] == "deterministic"
+
+
+def test_clean_manifest_gates_deterministic_items_on_evidence_too(tmp_path, make_cfg):
+    """A parser that emits a path the repo does not have is a bug in the parser, and it has to
+    surface in dropped_without_evidence rather than reach the graph unchallenged."""
+    m = {
+        "datastores": [
+            {"kind": "s3", "name": "b", "evidence": "ghost.tf:2", "source": "deterministic"}
+        ]
+    }
+    dropped, _ = atlas.clean_manifest(m, tmp_path, make_cfg())
+    assert m["datastores"] == []
+    assert [d["field"] for d in dropped] == ["datastores"]
+
+
 def test_clean_manifest_accepts_a_mixed_case_domain_list(tmp_path, make_cfg):
     cfg = make_cfg(domains=["Payments", " Identity "])
     m = {"domain": "Payments"}

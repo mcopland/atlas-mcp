@@ -13,7 +13,7 @@
   atlas.py status
 
 Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
-  repos/<name>.json   per-repo manifest (LLM facts + deterministic package facts + _meta)
+  repos/<name>.json   per-repo manifest (LLM facts + deterministic repo facts + _meta)
   repos.json          resolved repo name -> path map from the last run
   graph.json          joined cross-repo graph (read by atlas_mcp.py)
   docs/<name>.md      per-repo doc with component diagram
@@ -165,6 +165,8 @@ DEFAULT_IGNORE_CHANGES = [
     "*.jpg",
     "*.gif",
     "*.svg",
+    # CODEOWNERS lives here, but owners are deterministic now: an owners-only commit lands in
+    # restamp, which re-runs extract_facts for free. Ignoring it buys the refresh without a call.
     ".github/*",
     ".vscode/*",
     ".idea/*",
@@ -542,6 +544,452 @@ def extract_packages(repo):
     return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
 
 
+# ---------- a yaml subset ----------
+
+# Deploy and API manifests are yaml, and reading them by hand is the price of the script staying
+# stdlib-only. This covers block mappings and sequences, quoted scalars, flow collections, and
+# block scalars kept as opaque text. Anchors and aliases are dropped rather than resolved, and
+# anything else yields no documents at all, so a file we cannot read is simply not a source.
+
+BLOCK_SCALAR = re.compile(r"^(.*?):\s*[|>][0-9+-]*$")
+# A colon only opens a value when a space or the line end follows it, which is what stops
+# `https://host` and `image: redis:7` from being read as keys.
+MAP_ENTRY = re.compile(r"^([^:\s][^:]*):(?:\s+(.*))?$")
+
+
+def strip_comment(line):
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+    return line
+
+
+def yaml_scalar(text):
+    text = text.strip()
+    if text[:1] == "*":  # an alias; resolving these is more machinery than these formats need
+        return ""
+    if text[:1] in "&!":  # an anchor or a tag: keep the value it decorates, drop the decoration
+        text = text.split(" ", 1)[1].strip() if " " in text else ""
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1]
+    return text
+
+
+def split_flow(text):
+    parts, depth, quote, start = [], 0, "", 0
+    for i, ch in enumerate(text):
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [p for p in (p.strip() for p in parts) if p]
+
+
+def yaml_value(text):
+    if text.startswith("[") and text.endswith("]"):
+        return [yaml_value(p) for p in split_flow(text[1:-1])]
+    if text.startswith("{") and text.endswith("}"):
+        out = {}
+        for part in split_flow(text[1:-1]):
+            key, sep, value = part.partition(":")
+            if not sep:
+                raise ValueError(f"not a flow mapping entry: {part!r}")
+            out[yaml_scalar(key)] = yaml_value(value.strip())
+        return out
+    return yaml_scalar(text)
+
+
+def yaml_scan(text):
+    """One list of (indent, content, block_body) per document. Block bodies are taken from the
+    raw lines so that a `#` or a `key:` inside a script cannot be mistaken for structure."""
+    raw, docs, items, i = text.splitlines(), [], [], 0
+    while i < len(raw):
+        line, i = raw[i], i + 1
+        if "\t" in line[: len(line) - len(line.lstrip())]:
+            raise ValueError("tab indentation")
+        content = strip_comment(line).rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip(" "))
+        content = content.strip()
+        if indent == 0 and content in ("---", "..."):
+            docs.append(items)
+            items = []
+            continue
+        if m := BLOCK_SCALAR.match(content):
+            body = []
+            while i < len(raw) and (
+                not raw[i].strip() or len(raw[i]) - len(raw[i].lstrip()) > indent
+            ):
+                body.append(raw[i].strip())
+                i += 1
+            items.append((indent, m.group(1).strip() + ":", "\n".join(body).strip()))
+            continue
+        items.append((indent, content, None))
+    docs.append(items)
+    return docs
+
+
+def yaml_node(items, pos, indent):
+    first = items[pos][1]
+    if first == "-" or first.startswith("- "):
+        return yaml_seq(items, pos, indent)
+    return yaml_map(items, pos, indent)
+
+
+def yaml_map(items, pos, indent):
+    out = {}
+    while pos < len(items) and items[pos][0] == indent:
+        _, text, block = items[pos]
+        m = MAP_ENTRY.match(text)
+        if not m:
+            raise ValueError(f"not a mapping entry: {text!r}")
+        key, value = yaml_scalar(m.group(1)), (m.group(2) or "").strip()
+        pos += 1
+        if block is not None:
+            out[key] = block
+        elif value:
+            out[key] = yaml_value(value)
+        elif pos < len(items) and items[pos][0] > indent:
+            out[key], pos = yaml_node(items, pos, items[pos][0])
+        else:
+            out[key] = None
+    if pos < len(items) and items[pos][0] > indent:
+        raise ValueError(f"unexpected indent at {items[pos][1]!r}")
+    return out, pos
+
+
+def yaml_seq(items, pos, indent):
+    out = []
+    while pos < len(items) and items[pos][0] == indent:
+        col, text, block = items[pos]
+        if text != "-" and not text.startswith("- "):
+            break
+        rest = text[1:].strip()
+        pos += 1
+        if not rest:
+            if pos < len(items) and items[pos][0] > indent:
+                value, pos = yaml_node(items, pos, items[pos][0])
+            else:
+                value = None
+        elif MAP_ENTRY.match(rest):
+            # `- host: a` opens a mapping whose column is where `host` starts, and its sibling
+            # keys are indented to that same column rather than to the dash.
+            inner = col + len(text) - len(rest)
+            sub, end = [(inner, rest, block)], pos
+            while end < len(items) and items[end][0] >= inner:
+                sub.append(items[end])
+                end += 1
+            value, used = yaml_node(sub, 0, inner)
+            if used != len(sub):
+                raise ValueError(f"unread lines under {rest!r}")
+            pos = end
+        else:
+            value = yaml_value(rest)
+        out.append(value)
+    return out, pos
+
+
+def parse_yaml_docs(text):
+    try:
+        out = []
+        for items in yaml_scan(text):
+            if not items:
+                continue
+            value, pos = yaml_node(items, 0, items[0][0])
+            if pos != len(items):
+                raise ValueError(f"trailing content at {items[pos][1]!r}")
+            out.append(value)
+        return out
+    except (ValueError, IndexError):
+        return []
+
+
+# ---------- deterministic repo facts ----------
+
+FACTS_VERSION = 1
+FACTS_MAX_YAML_FILES = 400
+CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
+OPENAPI_JSON = ("openapi*.json", "swagger*.json")
+PROTO_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;")
+PROTO_SERVICE = re.compile(r"^\s*service\s+(\w+)\s*\{")
+TF_RESOURCE = re.compile(r'^\s*resource\s+"(\w+)"\s+"[^"]*"\s*\{')
+TF_LITERAL = re.compile(r'^\s*(\w+)\s*=\s*"([^"]*)"\s*$')
+TF_RESOURCES = {  # resource type -> (attribute holding the real name, our kind, is a datastore)
+    "aws_sqs_queue": ("name", "queue", False),
+    "aws_s3_bucket": ("bucket", "s3", True),
+    "aws_dynamodb_table": ("name", "dynamodb", True),
+}
+
+
+def facts_text(path):
+    """Unredacted, unlike read_capped: nothing here is shown to a model, and redaction would eat
+    the very names we are after. None when the file is missing or too big to be worth parsing."""
+    try:
+        if path.stat().st_size > BUNDLE_MAX_FILE_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def codeowners_rule(text):
+    """The rule that covers the whole repo: `*` if it is there, else the first one written."""
+    best = None
+    for line in text.splitlines():
+        line = strip_comment(line).strip()
+        if not line or line.startswith("["):  # a GitLab section header, not a rule
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if best is None or parts[0] == "*":
+            best = parts[1:]
+        if parts[0] == "*":
+            break
+    return best or []
+
+
+def extract_facts(repo, stoplist=frozenset()):
+    """Names, endpoints, owned stores and owners read straight out of the repo's own deploy and
+    API manifests. The model would otherwise have to infer all of this from a bundle excerpt, so
+    doing it here costs no credits and puts the resulting edges on the `exact` tier."""
+    idents, owners, exposes, datastores = {}, [], [], []
+
+    def usable(raw):
+        # provide(..., "exact") in build() skips the alias stoplist, so a machine-generated "api"
+        # or "db" would quietly make this repo the org-wide owner of that name.
+        text = str(raw or "").strip()
+        return "" if len(text) < 2 or text.lower() in stoplist else text
+
+    def ident(raw):
+        if text := usable(raw):
+            idents.setdefault(text.lower(), text)
+        return text
+
+    def expose(kind, key, detail, evidence, as_identifier=True):
+        # A service name or an ingress host is also a name this repo answers to; a queue name is
+        # only ever an expose key, and indexing it as a hostname would invent edges.
+        key = ident(key) if as_identifier else usable(key)
+        if key:
+            exposes.append(
+                {
+                    "kind": kind,
+                    "name": key,
+                    "key": key,
+                    "detail": detail,
+                    "evidence": evidence,
+                    "source": "deterministic",
+                }
+            )
+
+    def store(kind, name, evidence):
+        if name := str(name or "").strip():
+            datastores.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "access": "owner",
+                    "evidence": evidence,
+                    "source": "deterministic",
+                }
+            )
+
+    def own(raw):
+        if (text := str(raw or "").strip()) and text not in owners:
+            owners.append(text)
+
+    def server_hosts(doc, rel):
+        info = doc.get("info") if isinstance(doc.get("info"), dict) else {}
+        title = str(info.get("title") or "").strip()
+        if title and not re.search(r"\s", title):  # a prose title is not a join key
+            ident(title)
+        servers = doc.get("servers")
+        for server in servers if isinstance(servers, list) else []:
+            url = server.get("url") if isinstance(server, dict) else server
+            host = svc_forms(url)[0]
+            if host and not noisy_host(host):
+                expose("http", host, "openapi server", rel)
+
+    for rel in CODEOWNERS_PATHS:
+        if (text := facts_text(repo / rel)) is not None:
+            for owner in codeowners_rule(text):
+                own(owner)
+            break
+
+    parsed = 0
+    for f in walk(repo, {"*.yaml", "*.yml"}):
+        rel = f.relative_to(repo).as_posix()
+        if "templates/" in rel:  # a Helm template is a Go template, not yaml
+            continue
+        if parsed >= FACTS_MAX_YAML_FILES:
+            break
+        text = facts_text(f)
+        if text is None:
+            continue
+        parsed += 1
+        base = f.name.lower()
+        for doc in parse_yaml_docs(text):
+            if not isinstance(doc, dict):
+                continue
+            meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+            if base.startswith("catalog-info"):
+                ident(meta.get("name"))
+                own(spec.get("owner"))
+                apis = spec.get("providesApis")
+                for api in apis if isinstance(apis, list) else []:
+                    ident(api)
+            elif base == "chart.yaml":
+                ident(doc.get("name"))
+            elif base.startswith(("docker-compose", "compose")):
+                services = doc.get("services")
+                for name, body in (services if isinstance(services, dict) else {}).items():
+                    # Without a build section the entry is an off-the-shelf image, a local dev
+                    # alias such as `postgres`, not a name this repo answers to.
+                    if isinstance(body, dict) and body.get("build") is not None:
+                        ident(name)
+            elif base.startswith(("openapi", "swagger")):
+                server_hosts(doc, rel)
+            if not (doc.get("apiVersion") and doc.get("kind")):
+                continue
+            if doc["kind"] == "Service":
+                name = ident(meta.get("name"))
+                expose("http", name, "kubernetes service", rel)
+                if name and (ns := str(meta.get("namespace") or "").strip()):
+                    ident(f"{name}.{ns}.svc.cluster.local")
+            elif doc["kind"] == "Ingress":
+                rules = spec.get("rules")
+                for rule in rules if isinstance(rules, list) else []:
+                    if isinstance(rule, dict):
+                        expose("http", rule.get("host"), "ingress host", rel)
+
+    for f in walk(repo, set(OPENAPI_JSON)):
+        text = facts_text(f)
+        if text is None:
+            continue
+        try:
+            doc = json.loads(text)
+        except ValueError as e:
+            print(f"warn: could not parse {f}: {e}", file=sys.stderr)
+            continue
+        if isinstance(doc, dict):
+            server_hosts(doc, f.relative_to(repo).as_posix())
+
+    for f in walk(repo, {"*.proto"}):
+        text = facts_text(f)
+        if text is None:
+            continue
+        rel, package = f.relative_to(repo).as_posix(), ""
+        for n, line in enumerate(text.splitlines(), 1):
+            if m := PROTO_PACKAGE.match(line):
+                package = m.group(1)
+            elif package and (m := PROTO_SERVICE.match(line)):
+                expose("grpc", f"{package}.{m.group(1)}", "grpc service", f"{rel}:{n}")
+
+    for f in walk(repo, {"*.tf"}):
+        text = facts_text(f)
+        if text is None:
+            continue
+        rel, resource = f.relative_to(repo).as_posix(), None
+        for n, line in enumerate(text.splitlines(), 1):
+            if m := TF_RESOURCE.match(line):
+                resource = TF_RESOURCES.get(m.group(1))
+            elif line.startswith("}"):
+                resource = None
+            elif resource and (m := TF_LITERAL.match(line)):
+                attr, kind, is_store = resource
+                # A partly interpolated name is not a string any consumer can match on.
+                if m.group(1) != attr or "${" in m.group(2):
+                    continue
+                if is_store:
+                    store(kind, m.group(2), f"{rel}:{n}")
+                else:
+                    expose(kind, m.group(2), f"terraform {kind}", f"{rel}:{n}", as_identifier=False)
+
+    def first_per_key(items, keyer, order):
+        """One entry per name. An ingress host is usually also the openapi server url, and the
+        second copy only doubles up in the docs; sorting first keeps which one wins stable."""
+        out = {}
+        for item in sorted(items, key=order):
+            out.setdefault(keyer(item), item)
+        return list(out.values())
+
+    return {
+        "identifiers": [text for _, text in sorted(idents.items())],
+        "exposes": first_per_key(
+            exposes, expose_key, lambda e: (e["kind"], e["key"], e["evidence"])
+        ),
+        "datastores": first_per_key(
+            datastores, store_key, lambda d: (d["kind"], d["name"], d["evidence"])
+        ),
+        "owners": owners,
+    }
+
+
+def expose_key(item):
+    return str(item.get("kind") or "").lower(), str(item.get("key") or "").lower()
+
+
+def store_key(item):
+    return str(item.get("kind") or "").lower(), str(item.get("name") or "").lower()
+
+
+def merge_facts(manifest, facts, prev_meta):
+    """Deterministic items beat the model's on a collision, and the previous run's are cleared
+    out first: a restamp reuses the old entry wholesale and an update prompt hands the model the
+    old entry to edit, so without the strip every run would append another copy of everything,
+    and a deleted catalog-info.yaml would leave its name behind for good."""
+    stale = (prev_meta or {}).get("deterministic") or {}
+    for field, keyer in (("exposes", expose_key), ("datastores", store_key)):
+        model = [
+            i
+            for i in manifest.get(field) or []
+            if isinstance(i, dict) and i.get("source") != "deterministic"
+        ]
+        fresh = [dict(i) for i in facts[field]]
+        taken = {keyer(i) for i in fresh}
+        for item in fresh:
+            beaten = next((m for m in model if keyer(m) == keyer(item)), {})
+            # A deterministic name is only ever the key repeated, so a label the model wrote
+            # ("Orders API", "POST /orders") reads better in the docs. Its detail is all we get.
+            if beaten.get("name") and item.get("name") == item.get("key"):
+                item["name"] = beaten["name"]
+            if beaten.get("detail") and not item.get("detail"):
+                item["detail"] = beaten["detail"]
+        manifest[field] = fresh + [i for i in model if keyer(i) not in taken]
+
+    dead = {str(s).strip().lower() for s in stale.get("identifiers") or []}
+    live = {str(t).strip().lower() for t in facts["identifiers"]}
+    seen, kept = set(), []
+    for text in list(manifest.get("identifiers") or []) + list(facts["identifiers"]):
+        form = str(text).strip().lower()
+        if form in seen or (form in dead and form not in live):
+            continue
+        seen.add(form)
+        kept.append(text)
+    manifest["identifiers"] = kept
+
+    if facts["owners"]:
+        manifest["owners"] = list(facts["owners"])
+    else:
+        dead = {str(s).strip() for s in stale.get("owners") or []}
+        manifest["owners"] = [o for o in manifest.get("owners") or [] if str(o).strip() not in dead]
+
+
 # ---------- context bundle ----------
 
 BUNDLE_WALK_DEPTH = 4
@@ -722,13 +1170,15 @@ def excerpt_blocks(repo, paths):
     return blocks
 
 
+def noisy_host(host):
+    return any(host == n or host.endswith("." + n) for n in NOISE_HOSTS)
+
+
 def signal_key(category, match):
     if category != "url":
         return match.group("key").lower()
     host = match.group("key").split(":")[0].lower()
-    if any(host == n or host.endswith("." + n) for n in NOISE_HOSTS):
-        return None
-    return host
+    return None if noisy_host(host) else host
 
 
 def signal_sections(repo, paths):
@@ -1034,7 +1484,10 @@ def process_repo(cfg, name, repo, args):
     stamp = prompt_hash(mapper)
 
     if old and not args.full and meta.get("prompt_hash") == stamp:
-        if meta.get("commit") == head:
+        # A new extractor does not move the prompt hash, so without the facts stamp a repo whose
+        # commit has not changed would never pick one up. A stale stamp lands in restamp, which
+        # re-reads the deterministic facts without spending a credit.
+        if meta.get("commit") == head and meta.get("facts_version") == FACTS_VERSION:
             return name, "skip", "up to date"
         full_due = is_full_due(meta.get("last_full_at"), cfg["full_regen_days"])
         if not full_due:
@@ -1093,6 +1546,10 @@ def process_repo(cfg, name, repo, args):
         except ValueError:
             manifest = run_kiro(cfg, repo, prompt, log, mapper)  # one retry on unparseable output
 
+    # Merged before the gate, so a parser that emits a path the repo does not have shows up in
+    # dropped_without_evidence instead of reaching the graph unchallenged.
+    facts = extract_facts(repo, cfg["generic_identifiers"])
+    merge_facts(manifest, facts, meta)
     dropped, rejected = clean_manifest(manifest, repo, cfg)
     manifest["name"] = name
     forced = domain_for(cfg, name)
@@ -1114,6 +1571,10 @@ def process_repo(cfg, name, repo, args):
         "domain_rejected": rejected,
         "prompt_hash": stamp,
         "prompt_bytes": prompt_bytes,
+        "facts_version": FACTS_VERSION,
+        # identifiers and owners are plain strings and cannot carry a per-item source key, so
+        # the next run needs this record to tell last run's deterministic names from the model's.
+        "deterministic": {"identifiers": facts["identifiers"], "owners": facts["owners"]},
     }
     write_json(out, manifest)
     sent = f", {human_bytes(prompt_bytes)} prompt" if prompt_bytes else ""

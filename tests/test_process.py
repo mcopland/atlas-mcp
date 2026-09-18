@@ -50,6 +50,7 @@ def seed(cfg, make_manifest, repo, name, head, **meta):
         "last_full_at": atlas.now().isoformat(),
         "dropped_without_evidence": [],
         "prompt_hash": atlas.prompt_hash(cfg["mapper_mode"]),
+        "facts_version": atlas.FACTS_VERSION,
     }
     base.update(meta)
     return make_manifest(cfg, name, _meta=base, summary="old summary")
@@ -421,6 +422,97 @@ def test_a_restamp_keeps_the_prompt_hash(make_repo, make_cfg, make_manifest, gen
     assert mode == "restamp"
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
     assert written["_meta"]["prompt_hash"] == atlas.prompt_hash(cfg["mapper_mode"])
+
+
+# ---------- deterministic facts ----------
+
+SERVICE = "apiVersion: v1\nkind: Service\nmetadata:\n  name: orders-api\n"
+
+
+def test_deterministic_facts_are_merged_into_the_model_entry(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    repo = make_repo("svc", files={"k8s/svc.yaml": SERVICE, "CODEOWNERS": "* @org/platform\n"})
+    cfg = make_cfg()
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert "orders-api" in written["identifiers"]
+    assert written["owners"] == ["@org/platform"]
+    assert [e["key"] for e in written["exposes"]] == ["orders-api"]
+    assert written["_meta"]["facts_version"] == atlas.FACTS_VERSION
+    assert written["_meta"]["deterministic"]["owners"] == ["@org/platform"]
+
+
+def test_a_stale_facts_version_restamps_instead_of_skipping(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """Adding an extractor does not change the prompt hash, so without this a repo whose commit
+    has not moved would never pick the new facts up."""
+    repo = make_repo("svc", files={"k8s/svc.yaml": SERVICE})
+    cfg = make_cfg()
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    seed(cfg, make_manifest, repo, "svc", head, facts_version=atlas.FACTS_VERSION - 1)
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    assert stub_kiro == []
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["identifiers"] == ["orders-api"]
+    assert written["_meta"]["facts_version"] == atlas.FACTS_VERSION
+
+
+def test_a_manifest_predating_the_extractors_restamps(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    repo = make_repo("svc", files={"k8s/svc.yaml": SERVICE})
+    cfg = make_cfg()
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    seed(cfg, make_manifest, repo, "svc", head, facts_version=None)
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    assert stub_kiro == []
+
+
+def test_repeated_restamps_do_not_duplicate_deterministic_items(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    repo = make_repo("svc", files={"k8s/svc.yaml": SERVICE, "README.md": "x"})
+    cfg = make_cfg(ignore_changes=["*.md"])
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    for i in range(3):
+        commit(repo, "README.md", f"changed {i}")
+        _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+        assert mode == "restamp"
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["identifiers"] == ["orders-api"]
+    assert len(written["exposes"]) == 1
+
+
+def test_a_restamp_picks_up_a_codeowners_change_without_a_model_call(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """CODEOWNERS lives under .github/*, which stays in ignore_changes: owners are deterministic
+    now, so the free restamp path refreshes them and the update prompt is not worth its credit."""
+    repo = make_repo("svc", files={".github/CODEOWNERS": "* @org/old-team\n"})
+    cfg = make_cfg()
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    commit(repo, ".github/CODEOWNERS", "* @org/new-team\n")
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    assert stub_kiro == []
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["owners"] == ["@org/new-team"]
+
+
+def test_a_deterministic_identifier_that_is_generic_never_reaches_the_manifest(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    repo = make_repo(
+        "svc", files={"k8s/svc.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: gateway\n"}
+    )
+    cfg = make_cfg()
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["identifiers"] == []
 
 
 # ---------- bundle mode ----------
