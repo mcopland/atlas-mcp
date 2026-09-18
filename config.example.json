@@ -9,6 +9,7 @@
   "kiro_bin": "kiro-cli",
   "model": "claude-haiku-4.5",
   "mapper_mode": "bundle",
+  "bundle_budget_bytes": 409600,
   "explore_repos": [],
   "kiro_agent": null,
   "kiro_extra_args": [],

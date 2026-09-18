@@ -213,6 +213,56 @@ def test_dependents_and_dependencies_filter_by_kind(loaded):
     assert json.loads(atlas_mcp.dependencies("web"))["unresolved"][0]["key"] == "stripe.com"
 
 
+def test_impact_groups_dependents_by_hop(loaded):
+    got = json.loads(atlas_mcp.impact("billing"))
+    assert got["repo"] == "billing"
+    assert got["total"] == 2
+    assert [h["hop"] for h in got["hops"]] == [1, 2]
+    assert [r["repo"] for r in got["hops"][0]["repos"]] == ["orders"]
+    assert [r["repo"] for r in got["hops"][1]["repos"]] == ["web"]
+    assert got["hops"][1]["repos"][0]["via"]["kind"] == "http"
+
+
+def test_impact_stops_at_max_hops(loaded):
+    got = json.loads(atlas_mcp.impact("billing", max_hops=1))
+    assert got["total"] == 1
+    assert [h["hop"] for h in got["hops"]] == [1]
+
+
+def test_impact_filters_by_edge_kind(loaded):
+    got = json.loads(atlas_mcp.impact("billing", kind="http"))
+    assert got["total"] == 0
+    assert got["hops"] == []
+
+
+def test_impact_reports_an_unresolvable_name(loaded):
+    assert "error" in json.loads(atlas_mcp.impact("nothing-like-this"))
+
+
+def test_impact_terminates_on_a_cycle(atlas_env, tmp_path):
+    def edge(a, b):
+        return {"from": a, "to": b, "kind": "http", "key": f"{b}.internal", "match": "exact"}
+
+    atlas_env(
+        {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "repos": {n: repo_row(tmp_path, n) for n in ("a", "b", "c")},
+            "edges": [edge("a", "b"), edge("b", "c"), edge("c", "a")],
+            "unresolved": [],
+            "shared_datastores": [],
+        }
+    )
+    got = json.loads(atlas_mcp.impact("a", max_hops=10))
+    reached = [r["repo"] for h in got["hops"] for r in h["repos"]]
+    assert sorted(reached) == ["b", "c"]
+    assert got["total"] == 2
+
+
+def test_impact_clamps_an_absurd_hop_count(loaded):
+    assert json.loads(atlas_mcp.impact("billing", max_hops=500))["max_hops"] == 10
+    assert json.loads(atlas_mcp.impact("billing", max_hops=0))["max_hops"] == 1
+
+
 def test_find_path_walks_directed_edges(loaded):
     got = json.loads(atlas_mcp.find_path("web", "billing"))
     assert got["directed"] is True

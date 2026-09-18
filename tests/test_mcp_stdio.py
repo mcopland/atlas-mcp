@@ -18,6 +18,7 @@ TOOLS = [
     "freshness",
     "get_doc",
     "get_repo",
+    "impact",
     "list_repos",
     "search",
 ]
@@ -87,6 +88,12 @@ def test_server_serves_its_tools_over_stdio(served_atlas):
             listed = await session.list_tools()
             assert sorted(t.name for t in listed.tools) == TOOLS
             assert all(t.description for t in listed.tools)
+            # Clients that honour annotations stop prompting for approval on a read-only tool.
+            # by_alias because the wire field is readOnlyHint whatever the model calls it.
+            assert all(
+                t.annotations and t.annotations.model_dump(by_alias=True)["readOnlyHint"]
+                for t in listed.tools
+            )
             repos = json.loads(_text(await session.call_tool("list_repos", {})))
             assert [r["name"] for r in repos["repos"]] == ["orders"]
             doc = _text(await session.call_tool("get_doc", {"name": "orders.internal"}))

@@ -120,7 +120,7 @@ def test_oversized_update_prompt_falls_back_to_full(
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "main.go", "package main // v2")
-    monkeypatch.setattr(atlas, "MAX_PROMPT_BYTES", 200)
+    monkeypatch.setattr(atlas, "MAX_UPDATE_PROMPT_BYTES", 200)
     _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
     assert "Current entry" not in stub_kiro[0]
@@ -236,6 +236,25 @@ def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
     seen = _spy_run(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
     assert "--agent" not in seen["cmd"]
+
+
+def test_the_prompt_is_sent_on_stdin_and_not_on_the_command_line(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg()
+    seen = _spy_run(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "map this repo", tmp_path / "logs" / "svc.log")
+    assert seen["kwargs"]["input"] == "map this repo"
+    assert "map this repo" not in seen["cmd"]
+    assert "stdin" not in seen["kwargs"]
+
+
+def test_the_log_records_the_prompt_length_not_its_text(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg()
+    log = tmp_path / "logs" / "svc.log"
+    _spy_run(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "secret-looking prompt text", log)
+    text = log.read_text(encoding="utf-8")
+    assert "<prompt 26 chars>" in text
+    assert "secret-looking prompt text" not in text
 
 
 def test_command_line_disables_line_wrapping(make_cfg, monkeypatch, tmp_path):
@@ -488,15 +507,68 @@ def test_a_bundle_update_carries_only_the_changed_files(
     assert "untouched.internal" not in stub_kiro[0]
 
 
-def test_the_bundle_prompt_stays_within_the_argv_budget(make_repo, make_cfg, gen_args, stub_kiro):
+def big_repo_files(count=60):
     files = {
-        f"pkg{i}/package.json": json.dumps({"name": f"p{i}", "x": "y" * 9000}) for i in range(60)
+        f"pkg{i}/package.json": json.dumps({"name": f"p{i}", "x": "y" * 9000}) for i in range(count)
     }
     files["internal/c.go"] = "\n".join(f'u{i} := "https://h{i}.internal"' for i in range(500))
-    repo = make_repo("svc", files=files)
+    return files
+
+
+def test_the_bundle_prompt_stays_within_the_configured_budget(
+    make_repo, make_cfg, gen_args, stub_kiro
+):
+    repo = make_repo("svc", files=big_repo_files())
+    cfg = make_cfg(bundle_budget_bytes=120 * 1024)
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert len(stub_kiro[0].encode()) <= cfg["bundle_budget_bytes"]
+
+
+def test_a_bigger_budget_sends_more_of_the_repo(make_repo, make_cfg, gen_args, stub_kiro):
+    repo = make_repo("svc", files=big_repo_files())
+    small = make_cfg(bundle_budget_bytes=40 * 1024)
+    atlas.process_repo(small, "svc", repo, gen_args)
+    large = make_cfg(bundle_budget_bytes=400 * 1024)
+    gen_args.full = True  # the first call already mapped this commit
+    atlas.process_repo(large, "svc", repo, gen_args)
+    assert len(stub_kiro[1].encode()) > len(stub_kiro[0].encode())
+    assert len(stub_kiro[1].encode()) <= large["bundle_budget_bytes"]
+
+
+def test_an_update_prompt_keeps_the_smaller_update_cap(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """A full bundle may be 400 KB; an update carries the old entry too, so it keeps its own cap."""
+    repo = make_repo("svc", files=big_repo_files())
+    cfg = make_cfg(bundle_budget_bytes=400 * 1024, max_changed_files_for_update=150)
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    for i in range(60):
+        (repo / f"pkg{i}" / "package.json").write_text(
+            json.dumps({"name": f"p{i}", "x": "z" * 9000})
+        )
+    commit(repo, "internal/c.go", "\n".join(f'u{i} := "https://j{i}.internal"' for i in range(500)))
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "update"
+    assert len(stub_kiro[0].encode()) <= atlas.MAX_UPDATE_PROMPT_BYTES
+
+
+def test_meta_records_the_prompt_bytes_that_were_sent(make_repo, make_cfg, gen_args, stub_kiro):
+    repo = make_repo("svc")
     cfg = make_cfg()
     atlas.process_repo(cfg, "svc", repo, gen_args)
-    assert len(stub_kiro[0].encode()) <= atlas.MAX_PROMPT_BYTES
+    meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
+    assert meta["prompt_bytes"] == len(stub_kiro[0].encode("utf-8"))
+
+
+def test_a_restamp_records_no_prompt_bytes(make_repo, make_cfg, make_manifest, gen_args, stub_kiro):
+    repo = make_repo("svc", files={"main.go": "package main", "README.md": "x"})
+    cfg = make_cfg(ignore_changes=["*.md"])
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    commit(repo, "README.md", "changed")
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
+    assert meta["prompt_bytes"] == 0
 
 
 def test_meta_records_the_mapper_mode_and_its_prompt_hash(make_repo, make_cfg, gen_args, stub_kiro):

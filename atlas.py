@@ -113,7 +113,11 @@ GRADLE_DEP = re.compile(
                         \b[\s(]+['"]([^'":\s]+):([^'":\s]+)""",
     re.VERBOSE,
 )
-MAX_PROMPT_BYTES = 96 * 1024
+# Update prompts only: an update carries the old entry and the changed-file list as well as a
+# bundle, and past this it is cheaper to regenerate in full. Full prompts are sized by the
+# bundle_budget_bytes config key, which the model's context window bounds, not argv.
+MAX_UPDATE_PROMPT_BYTES = 96 * 1024
+DEFAULT_BUNDLE_BUDGET_BYTES = 400 * 1024
 TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 PROMPTS = {"explore": ("full.md", "update.md"), "bundle": ("bundle_full.md", "bundle_update.md")}
 DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle"}
@@ -186,6 +190,7 @@ def load_config(path):
         "model": "claude-haiku-4.5",
         "kiro_extra_args": [],
         "mapper_mode": "bundle",
+        "bundle_budget_bytes": DEFAULT_BUNDLE_BUDGET_BYTES,
         "explore_repos": [],
         "repo_domains": {},
         "parallel": 3,
@@ -203,6 +208,9 @@ def load_config(path):
         sys.exit(
             f"unknown mapper_mode {cfg['mapper_mode']!r}; expected one of {', '.join(sorted(PROMPTS))}"
         )
+    budget = cfg["bundle_budget_bytes"]
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        sys.exit(f"bundle_budget_bytes must be a positive integer, got {budget!r}")
     # None means "pick the agent that matches each repo's mapper mode"; "" means "pass no --agent".
     cfg.setdefault("kiro_agent", None)
     cfg["generic_identifiers"] = {
@@ -223,6 +231,18 @@ def git(repo, *args, timeout=60):
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
     return r.stdout.strip()
+
+
+def human_bytes(n):
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def human_secs(seconds):
+    return f"{seconds:.0f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
 
 
 def write_text(path, text):
@@ -804,12 +824,13 @@ def domain_for(cfg, name):
     return ""
 
 
-def mapper_prompt(cfg, repo, mapper, template, values, only=None):
-    """In bundle mode the bundle gets whatever the rendered template leaves of the argv budget."""
+def mapper_prompt(cfg, repo, mapper, template, values, only=None, cap=None):
+    """In bundle mode the bundle gets whatever the rendered template leaves of the prompt cap."""
     if mapper != "bundle":
         return build_prompt(cfg, template, **values)
     shell = build_prompt(cfg, template, BUNDLE="", **values)
-    budget = MAX_PROMPT_BYTES - len(shell.encode("utf-8")) - BUNDLE_MARGIN_BYTES
+    cap = cfg["bundle_budget_bytes"] if cap is None else cap
+    budget = cap - len(shell.encode("utf-8")) - BUNDLE_MARGIN_BYTES
     return build_prompt(cfg, template, BUNDLE=gather_bundle(repo, budget, only=only), **values)
 
 
@@ -905,18 +926,18 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
         cfg["model"],
         *agent,
         *cfg["kiro_extra_args"],
-        prompt,
     ]
     stamp = now().isoformat(timespec="seconds")
-    shown = " ".join(cmd[:-1])  # the prompt is the last argument and is logged by length, not text
-    header = f"=== attempt {stamp} ===\n$ {shown} <prompt {len(prompt)} chars>\n"
+    # The prompt goes in on stdin, which has no size limit of its own, and is logged by length
+    # rather than text so repo content never lands in the log.
+    header = f"=== attempt {stamp} ===\n$ {' '.join(cmd)} <prompt {len(prompt)} chars>\n"
     try:
         r = subprocess.run(
             cmd,
             cwd=cwd,
+            input=prompt,
             capture_output=True,
             text=True,
-            stdin=subprocess.DEVNULL,
             timeout=cfg["timeout_minutes"] * 60,
             env={**os.environ, "NO_COLOR": "1"},
         )
@@ -1034,6 +1055,7 @@ def process_repo(cfg, name, repo, args):
     if args.dry_run:
         return name, "dry-run", mode
 
+    prompt_bytes = 0
     if mode == "restamp":
         manifest = {k: v for k, v in old.items() if k != "_meta"}
     else:
@@ -1054,8 +1076,9 @@ def process_repo(cfg, name, repo, args):
                     ),
                 },
                 only=set(changed),
+                cap=MAX_UPDATE_PROMPT_BYTES,
             )
-            if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+            if len(prompt.encode("utf-8")) > MAX_UPDATE_PROMPT_BYTES:
                 print(
                     f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full",
                     file=sys.stderr,
@@ -1063,6 +1086,7 @@ def process_repo(cfg, name, repo, args):
                 mode, changed, prompt = "full", [], None
         if prompt is None:
             prompt = mapper_prompt(cfg, repo, mapper, full_template, {})
+        prompt_bytes = len(prompt.encode("utf-8"))
         log = cfg["atlas_dir"] / "logs" / f"{name}.log"
         try:
             manifest = run_kiro(cfg, repo, prompt, log, mapper)
@@ -1089,13 +1113,16 @@ def process_repo(cfg, name, repo, args):
         "dropped_without_evidence": dropped,
         "domain_rejected": rejected,
         "prompt_hash": stamp,
+        "prompt_bytes": prompt_bytes,
     }
     write_json(out, manifest)
+    sent = f", {human_bytes(prompt_bytes)} prompt" if prompt_bytes else ""
     return (
         name,
         mode,
         (
-            f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, {len(dropped)} dropped"
+            f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, "
+            f"{len(dropped)} dropped{sent}"
         ),
     )
 
@@ -1457,6 +1484,20 @@ def render_docs(ad, manifests, graph):
 # ---------- commands ----------
 
 
+MODE_ORDER = ("full", "update", "restamp", "skip", "dry-run")
+
+
+def manifest_prompt_bytes(cfg, name):
+    """Kiro cannot report credits in headless mode, so the run summary reports what was sent
+    instead; process_repo has already written it to the manifest."""
+    path = cfg["atlas_dir"] / "repos" / f"{name}.json"
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8"))["_meta"]["prompt_bytes"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"warn: could not read prompt bytes from {path}: {e}", file=sys.stderr)
+        return 0
+
+
 def cmd_generate(cfg, args):
     repos = discover_repos(cfg)
     if not repos:
@@ -1473,7 +1514,7 @@ def cmd_generate(cfg, args):
     if not items:
         sys.exit("no repos selected")
 
-    errors = 0
+    errors, counts, prompt_bytes, started = 0, {}, 0, now()
     # A dry run writes nothing, so make it readable during a real run rather than having it
     # exit with "another atlas run holds ..." exactly when someone wants to see what is queued.
     lock = (
@@ -1490,10 +1531,22 @@ def cmd_generate(cfg, args):
             for fut in cf.as_completed(futures):
                 try:
                     name, mode, msg = fut.result()
+                    counts[mode] = counts.get(mode, 0) + 1
+                    if mode in ("full", "update"):
+                        prompt_bytes += manifest_prompt_bytes(cfg, name)
                     print(f"  {name}: {mode} ({msg})")
                 except Exception as e:
                     errors += 1
                     print(f"  {futures[fut]}: ERROR {e}", file=sys.stderr)
+        modes = (
+            ", ".join(f"{mode} {counts[mode]}" for mode in MODE_ORDER if counts.get(mode))
+            or "nothing mapped"
+        )
+        sent = "" if args.dry_run else f" | {human_bytes(prompt_bytes)} of prompts"
+        print(
+            f"done: {len(items)} repos in {human_secs((now() - started).total_seconds())} | "
+            f"{modes} | {errors} errors{sent}"
+        )
         if not args.dry_run and not args.no_build:
             build(cfg, known)
     sys.exit(1 if errors else 0)

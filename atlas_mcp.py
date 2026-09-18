@@ -13,6 +13,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 try:
     from mcp.server.mcpserver import MCPServer as Server  # mcp >= 2
 except ImportError:
@@ -20,6 +22,10 @@ except ImportError:
 
 ATLAS = Path(os.path.expanduser(os.environ.get("ATLAS_DIR", "~/atlas")))
 server = Server("atlas")
+# Every tool only reads the atlas. Clients that honour annotations stop prompting for approval
+# on each call without needing the permissions.yaml rule.
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
+MAX_IMPACT_HOPS = 10
 
 
 class Store:
@@ -92,7 +98,7 @@ def out(obj):
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def list_repos(domain: str = "", kind: str = "") -> str:
     """List every repo in the org atlas with a one-line summary. Optional filters: domain, kind
     (service, library, frontend, infra, job, tool)."""
@@ -106,7 +112,7 @@ def list_repos(domain: str = "", kind: str = "") -> str:
     return out({"count": len(rows), "domains": domains, "repos": rows})
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def get_repo(name: str) -> str:
     """Full atlas entry for one repo: purpose, overview, what it exposes and consumes (with evidence
     file paths), datastores, components, resolved dependencies and dependents, source commit, local
@@ -135,7 +141,7 @@ def get_repo(name: str) -> str:
     )
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def dependents(name: str, kind: str = "") -> str:
     """Repos that depend on this repo: call its APIs, consume its events, or import its packages.
     Call this before changing an interface to find affected consumers. Optional kind filter."""
@@ -150,7 +156,37 @@ def dependents(name: str, kind: str = "") -> str:
     return out({"repo": repo, "count": len(edges), "dependents": edges})
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
+def impact(name: str, max_hops: int = 3, kind: str = "") -> str:
+    """Blast radius of a change to this repo: its dependents, their dependents, and so on, grouped
+    by hop distance, each with the edge that reached it. Use it when the direct consumers
+    `dependents` returns are not the whole story, for example before a breaking schema or event
+    change. Optional kind filter on the edges walked."""
+    repo, err = resolve(name)
+    if repo is None:
+        return out(err)
+    hops = max(1, min(max_hops, MAX_IMPACT_HOPS))
+    incoming: dict[str, list[dict[str, Any]]] = {}
+    for e in store.load()["edges"]:
+        if not kind or e["kind"] == kind:
+            incoming.setdefault(e["to"], []).append(e)
+    seen, frontier, levels = {repo}, [repo], []
+    for depth in range(1, hops + 1):
+        rows, nxt = [], []
+        for node in frontier:
+            for e in incoming.get(node, []):
+                if e["from"] not in seen:  # the first hop to reach a repo is its distance
+                    seen.add(e["from"])
+                    nxt.append(e["from"])
+                    rows.append({"repo": e["from"], "via": edge_view(e)})
+        if not rows:
+            break
+        levels.append({"hop": depth, "repos": sorted(rows, key=lambda r: r["repo"])})
+        frontier = nxt
+    return out({"repo": repo, "max_hops": hops, "total": len(seen) - 1, "hops": levels})
+
+
+@server.tool(annotations=READ_ONLY)
 def dependencies(name: str, kind: str = "") -> str:
     """What this repo depends on, plus consumes that could not be matched to any known repo (unresolved,
     often external services or env vars). Optional kind filter."""
@@ -167,7 +203,7 @@ def dependencies(name: str, kind: str = "") -> str:
     return out({"repo": repo, "dependencies": edges, "unresolved": unresolved})
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def find_path(source: str, target: str, max_hops: int = 6) -> str:
     """How two repos are connected: the shortest chain of dependency edges from source to target.
     Falls back to ignoring edge direction if no directed path exists."""
@@ -238,7 +274,7 @@ def _blobs():
     return store.blobs
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def search(query: str, limit: int = 10) -> str:
     """Keyword search across repo names, identifiers, summaries, overviews, endpoints, topics, packages,
     and datastores. Use when you don't know which repo owns something (an endpoint, topic, table, or concept)."""
@@ -264,7 +300,7 @@ def search(query: str, limit: int = 10) -> str:
     return out({"results": results[:limit]})
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def freshness(name: str = "") -> str:
     """Compare the commit each atlas entry was generated from with the repo's current local HEAD.
     Omit name to check every repo, which reports the total checked but lists only the entries that
@@ -325,7 +361,7 @@ def freshness(name: str = "") -> str:
     )
 
 
-@server.tool()
+@server.tool(annotations=READ_ONLY)
 def get_doc(name: str) -> str:
     """The rendered markdown doc for one repo: summary, overview, exposes, consumes with their
     resolved targets, dependents, datastores, and a component diagram. Use after get_repo when

@@ -42,6 +42,17 @@ def test_load_config_rejects_an_unknown_mapper_mode(make_cfg):
         make_cfg(mapper_mode="telepathy")
 
 
+def test_load_config_defaults_the_bundle_budget(make_cfg):
+    assert make_cfg()["bundle_budget_bytes"] == 400 * 1024
+
+
+@pytest.mark.parametrize("value", [0, -1, "400k", None])
+def test_load_config_rejects_a_bundle_budget_that_is_not_a_positive_int(make_cfg, value):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(bundle_budget_bytes=value)
+    assert "bundle_budget_bytes" in str(e.value)
+
+
 def test_config_extends_the_generic_identifier_stoplist(make_cfg):
     cfg = make_cfg(generic_identifiers=["Orders"])
     assert "orders" in cfg["generic_identifiers"]
@@ -229,6 +240,50 @@ def test_generate_reports_a_failed_repo_and_keeps_the_others(
     assert (repos / "good.json").exists()
     assert not (repos / "bad.json").exists()
     assert "ERROR" in capsys.readouterr().err
+
+
+def test_generate_prints_a_run_summary(make_repo, make_cfg, monkeypatch, capsys):
+    make_repo("svc-a")
+    make_repo("svc-b")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args())
+    summary = [line for line in capsys.readouterr().out.splitlines() if line.startswith("done:")]
+    assert len(summary) == 1
+    assert "2 repos" in summary[0]
+    assert "full 2" in summary[0]
+    assert "0 errors" in summary[0]
+    assert "of prompts" in summary[0]
+
+
+def test_the_run_summary_counts_a_failed_repo_as_an_error(make_repo, make_cfg, monkeypatch, capsys):
+    make_repo("good")
+    make_repo("bad")
+    cfg = make_cfg()
+
+    def flaky(cfg_, repo, prompt, log, mapper="explore"):
+        if repo.name == "bad":
+            raise RuntimeError("kiro exploded")
+        return _stub_manifest()
+
+    monkeypatch.setattr(atlas, "run_kiro", flaky)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args())
+    summary = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("done:"))
+    assert "full 1" in summary
+    assert "1 errors" in summary
+
+
+def test_a_dry_run_summary_reports_no_prompt_bytes(make_repo, make_cfg, monkeypatch, capsys):
+    make_repo("svc-a")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args(dry_run=True))
+    summary = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("done:"))
+    assert "dry-run 1" in summary
+    assert "of prompts" not in summary
 
 
 def test_generate_only_selects_a_subset(make_repo, make_cfg, monkeypatch):
