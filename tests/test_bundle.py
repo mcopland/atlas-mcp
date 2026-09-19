@@ -225,6 +225,18 @@ def test_a_tracked_submodule_is_not_read_as_a_file(make_repo, capsys):
     assert "warn:" not in capsys.readouterr().err
 
 
+def test_a_tracked_path_that_is_not_utf8_does_not_fail_the_repo(make_repo):
+    """git prints paths as the bytes they are. One undecodable name must not take the whole
+    listing, and with it the repo, down: it is skipped like any path that cannot be read. The
+    surrogate in the name reaches git as the raw byte 0xe9, with no file on disk to match."""
+    repo = make_repo("svc", files={"main.go": "package main"})
+    blob = atlas.git(repo, "rev-parse", "HEAD:main.go")
+    atlas.git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},caf\udce9.go")
+    text = bundle(repo)
+    assert "main.go" in text
+    assert "caf" not in text
+
+
 def test_the_tree_is_capped(make_repo, monkeypatch):
     files = {f"pkg/f{i}.go": "package pkg" for i in range(30)}
     repo = make_repo("svc", files=files)

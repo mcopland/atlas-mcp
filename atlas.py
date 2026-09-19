@@ -243,11 +243,12 @@ def load_config(path):
     return cfg
 
 
-def git(repo, *args, timeout=60):
+def git(repo, *args, timeout=60, errors=None):
     r = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        errors=errors,
         stdin=subprocess.DEVNULL,
         timeout=timeout,
     )
@@ -1187,8 +1188,13 @@ def tracked_files(repo):
     never reach the tree, the excerpts or the signal scan. None when there is nothing to list,
     which is the only case the walk still has to cover."""
     try:
-        listing = git(repo, "ls-files", "-z", "--cached", "--exclude-standard")
-    except (RuntimeError, OSError, subprocess.SubprocessError):
+        # A tracked path need not be utf-8, and git prints the bytes as they are. surrogateescape
+        # decodes such a name to the same string the filesystem calls it, so it is read if it is
+        # there and skipped if it is not, rather than failing the listing for the whole repo.
+        listing = git(
+            repo, "ls-files", "-z", "--cached", "--exclude-standard", errors="surrogateescape"
+        )
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
         return None  # not a work tree: falling back to the walk is the documented behaviour
     # git() strips whitespace and NUL is not whitespace, so the trailing separator survives.
     rels = sorted(r for r in listing.split("\0") if r and bundle_path_ok(r, repo))
