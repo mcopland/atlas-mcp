@@ -1599,7 +1599,7 @@ def process_repo(cfg, name, repo, args):
             # credit, even when a full regen is due: the model would see nothing new, and paying
             # for every dormant repo after a version bump is not what the 30-day refresh is for.
             if meta.get("facts_version") == FACTS_VERSION:
-                return name, "skip", "up to date"
+                return name, "skip", "up to date", 0
             mode = "restamp"
         elif not is_full_due(meta.get("last_full_at"), cfg["full_regen_days"]):
             try:
@@ -1617,7 +1617,7 @@ def process_repo(cfg, name, repo, args):
                 mode = "full"  # old commit missing (rewritten history, shallow clone)
 
     if args.dry_run:
-        return name, "dry-run", mode
+        return name, "dry-run", mode, 0
 
     # Read after the skip and dry-run branches, so neither pays for a subprocess it cannot use.
     remote_url = repo_remote_url(repo)
@@ -1701,6 +1701,7 @@ def process_repo(cfg, name, repo, args):
             f"{len(manifest['exposes'])} exposes, {len(manifest['consumes'])} consumes, "
             f"{len(dropped)} dropped{sent}"
         ),
+        prompt_bytes,
     )
 
 
@@ -2068,17 +2069,6 @@ def render_docs(ad, manifests, graph):
 MODE_ORDER = ("full", "update", "restamp", "skip", "dry-run")
 
 
-def manifest_prompt_bytes(cfg, name):
-    """Kiro cannot report credits in headless mode, so the run summary reports what was sent
-    instead; process_repo has already written it to the manifest."""
-    path = cfg["atlas_dir"] / "repos" / f"{name}.json"
-    try:
-        return int(json.loads(path.read_text(encoding="utf-8"))["_meta"]["prompt_bytes"])
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        print(f"warn: could not read prompt bytes from {path}: {e}", file=sys.stderr)
-        return 0
-
-
 def cmd_generate(cfg, args):
     repos = discover_repos(cfg)
     if not repos:
@@ -2111,10 +2101,11 @@ def cmd_generate(cfg, args):
             futures = {pool.submit(process_repo, cfg, n, p, args): n for n, p in items}
             for fut in cf.as_completed(futures):
                 try:
-                    name, mode, msg = fut.result()
+                    # Kiro cannot report credits in headless mode, so the summary reports
+                    # what each repo was sent instead.
+                    name, mode, msg, sent = fut.result()
                     counts[mode] = counts.get(mode, 0) + 1
-                    if mode in ("full", "update"):
-                        prompt_bytes += manifest_prompt_bytes(cfg, name)
+                    prompt_bytes += sent
                     print(f"  {name}: {mode} ({msg})")
                 except Exception as e:
                     errors += 1

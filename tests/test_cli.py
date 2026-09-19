@@ -257,6 +257,23 @@ def test_generate_prints_a_run_summary(make_repo, make_cfg, monkeypatch, capsys)
     assert "of prompts" in summary[0]
 
 
+def test_the_run_summary_totals_what_every_repo_was_sent(make_repo, make_cfg, monkeypatch, capsys):
+    """The one number a Kiro dashboard reconciliation rests on, since the CLI reports no credits."""
+    make_repo("svc-a")
+    make_repo("svc-b", files={"README.md": "b" * 4096})
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args())
+    summary = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("done:"))
+    total = sum(
+        json.loads(p.read_text())["_meta"]["prompt_bytes"]
+        for p in (cfg["atlas_dir"] / "repos").glob("*.json")
+    )
+    assert total > 0
+    assert f"{atlas.human_bytes(total)} of prompts" in summary
+
+
 def test_the_run_summary_counts_a_failed_repo_as_an_error(make_repo, make_cfg, monkeypatch, capsys):
     make_repo("good")
     make_repo("bad")

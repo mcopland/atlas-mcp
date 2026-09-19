@@ -60,7 +60,7 @@ def test_skips_when_head_is_unchanged(make_repo, make_cfg, make_manifest, gen_ar
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "skip"
     assert stub_kiro == []
 
@@ -72,7 +72,7 @@ def test_restamps_when_only_ignored_files_changed(
     cfg = make_cfg(ignore_changes=["*.md"])
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     head = commit(repo, "README.md", "changed")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     assert stub_kiro == []
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
@@ -87,7 +87,7 @@ def test_updates_and_passes_the_changed_files_to_the_prompt(
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "main.go", "package main // v2")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "update"
     assert len(stub_kiro) == 1
     assert "main.go" in stub_kiro[0]
@@ -99,7 +99,7 @@ def test_full_regeneration_when_forced(make_repo, make_cfg, make_manifest, gen_a
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     gen_args.full = True
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
     assert "Current entry" not in stub_kiro[0]
 
@@ -110,7 +110,7 @@ def test_full_regeneration_when_the_old_commit_is_gone(
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", "f" * 40)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
 
 
@@ -122,7 +122,7 @@ def test_oversized_update_prompt_falls_back_to_full(
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "main.go", "package main // v2")
     monkeypatch.setattr(atlas, "MAX_UPDATE_PROMPT_BYTES", 200)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
     assert "Current entry" not in stub_kiro[0]
 
@@ -131,7 +131,7 @@ def test_dry_run_never_calls_kiro(make_repo, make_cfg, gen_args, stub_kiro):
     repo = make_repo("svc")
     cfg = make_cfg()
     gen_args.dry_run = True
-    _, mode, detail = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, detail, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "dry-run"
     assert detail == "full"
     assert stub_kiro == []
@@ -325,7 +325,7 @@ def test_a_naive_last_full_at_forces_a_full_run(
         last_full_at="2026-01-01T00:00:00",
     )
     commit(repo, "main.go", "package main // v2")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
 
 
@@ -335,7 +335,7 @@ def test_a_manifest_without_a_prompt_hash_is_regenerated_in_full(
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"), prompt_hash=None)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
     assert len(stub_kiro) == 1
 
@@ -353,7 +353,7 @@ def test_a_changed_prompt_hash_forces_a_full_run_even_when_head_is_unchanged(
         atlas.git(repo, "rev-parse", "HEAD"),
         prompt_hash="000000000000",
     )
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
 
 
@@ -371,7 +371,7 @@ def test_a_changed_prompt_hash_beats_an_update(
         prompt_hash="000000000000",
     )
     commit(repo, "main.go", "package main // v2")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
     assert "Current entry" not in stub_kiro[0]
 
@@ -382,7 +382,7 @@ def test_a_matching_prompt_hash_and_unchanged_head_still_skip(
     repo = make_repo("svc")
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "skip"
 
 
@@ -400,7 +400,7 @@ def test_dry_run_reports_a_prompt_hash_change_as_full(
         prompt_hash="000000000000",
     )
     gen_args.dry_run = True
-    _, mode, detail = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, detail, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert (mode, detail) == ("dry-run", "full")
     assert stub_kiro == []
 
@@ -418,7 +418,7 @@ def test_a_restamp_keeps_the_prompt_hash(make_repo, make_cfg, make_manifest, gen
     cfg = make_cfg(ignore_changes=["*.md"])
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "README.md", "changed")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
     assert written["_meta"]["prompt_hash"] == atlas.prompt_hash(cfg["mapper_mode"])
@@ -452,7 +452,7 @@ def test_a_stale_facts_version_restamps_instead_of_skipping(
     cfg = make_cfg()
     head = atlas.git(repo, "rev-parse", "HEAD")
     seed(cfg, make_manifest, repo, "svc", head, facts_version=atlas.FACTS_VERSION - 1)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     assert stub_kiro == []
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
@@ -478,7 +478,7 @@ def test_a_stale_facts_version_restamps_even_when_a_full_regen_is_due(
         facts_version=atlas.FACTS_VERSION - 1,
         last_full_at="2020-01-01T00:00:00+00:00",
     )
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     assert stub_kiro == []
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
@@ -517,7 +517,7 @@ def test_a_restamp_backfills_the_git_metadata(
     cfg = make_cfg()
     head = atlas.git(repo, "rev-parse", "HEAD")
     seed(cfg, make_manifest, repo, "svc", head, facts_version=atlas.FACTS_VERSION - 1)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
     assert meta["remote_url"] == "https://github.com/org/orders"
@@ -535,7 +535,7 @@ def test_a_skipped_repo_reads_git_only_to_check_its_head(
     monkeypatch.setattr(
         atlas, "git", lambda r, *a, **kw: calls.append(a[0]) or original(r, *a, **kw)
     )
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "skip"
     assert calls == ["rev-parse"]
 
@@ -547,7 +547,7 @@ def test_a_manifest_predating_the_extractors_restamps(
     cfg = make_cfg()
     head = atlas.git(repo, "rev-parse", "HEAD")
     seed(cfg, make_manifest, repo, "svc", head, facts_version=None)
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     assert stub_kiro == []
 
@@ -560,7 +560,7 @@ def test_repeated_restamps_do_not_duplicate_deterministic_items(
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     for i in range(3):
         commit(repo, "README.md", f"changed {i}")
-        _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+        _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
         assert mode == "restamp"
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
     assert written["identifiers"] == ["orders-api"]
@@ -576,7 +576,7 @@ def test_a_restamp_picks_up_a_codeowners_change_without_a_model_call(
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, ".github/CODEOWNERS", "* @org/new-team\n")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     assert stub_kiro == []
     written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
@@ -636,7 +636,7 @@ def test_bundle_mode_sends_the_bundle_and_no_exploration_instructions(
         "svc", files={"README.md": "# svc", "internal/c.go": 'u := "https://orders.internal"'}
     )
     cfg = make_cfg()
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     prompt = stub_kiro[0]
     assert mode == "full"
     assert "## Tree" in prompt
@@ -673,7 +673,7 @@ def test_a_bundle_update_carries_only_the_changed_files(
     cfg = make_cfg()
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "b.go", 'u := "https://after.internal"')
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "update"
     assert "after.internal" in stub_kiro[0]
     assert "untouched.internal" not in stub_kiro[0]
@@ -719,7 +719,7 @@ def test_an_update_prompt_keeps_the_smaller_update_cap(
             json.dumps({"name": f"p{i}", "x": "z" * 9000})
         )
     commit(repo, "internal/c.go", "\n".join(f'u{i} := "https://j{i}.internal"' for i in range(500)))
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "update"
     assert len(stub_kiro[0].encode()) <= atlas.MAX_UPDATE_PROMPT_BYTES
 
@@ -737,7 +737,7 @@ def test_a_restamp_records_no_prompt_bytes(make_repo, make_cfg, make_manifest, g
     cfg = make_cfg(ignore_changes=["*.md"])
     seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
     commit(repo, "README.md", "changed")
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "restamp"
     meta = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())["_meta"]
     assert meta["prompt_bytes"] == 0
@@ -759,7 +759,7 @@ def test_switching_mapper_mode_regenerates_the_entry(
     cfg = make_cfg()
     head = atlas.git(repo, "rev-parse", "HEAD")
     seed(cfg, make_manifest, repo, "svc", head, prompt_hash=atlas.prompt_hash("explore"))
-    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
     assert mode == "full"
 
 
