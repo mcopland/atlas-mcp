@@ -896,7 +896,9 @@ def extract_facts(repo, stoplist=frozenset()):
             break
 
     parsed = 0
-    for f in walk(repo, {"*.yaml", "*.yml"}):
+    # Sorted, not os.walk order: which manifests fit under the cap is a property of the
+    # repo, not of how the filesystem happens to hand back a directory.
+    for f in sorted(walk(repo, {"*.yaml", "*.yml"})):
         rel = f.relative_to(repo).as_posix()
         if "templates/" in rel:  # a Helm template is a Go template, not yaml
             continue
@@ -942,7 +944,7 @@ def extract_facts(repo, stoplist=frozenset()):
                     if isinstance(rule, dict):
                         expose("http", rule.get("host"), "ingress host", rel)
 
-    for f in walk(repo, set(OPENAPI_JSON)):
+    for f in sorted(walk(repo, set(OPENAPI_JSON))):
         text = facts_text(f)
         if text is None:
             continue
@@ -954,7 +956,7 @@ def extract_facts(repo, stoplist=frozenset()):
         if isinstance(doc, dict):
             server_hosts(doc, f.relative_to(repo).as_posix())
 
-    for f in walk(repo, {"*.proto"}):
+    for f in sorted(walk(repo, {"*.proto"})):
         text = facts_text(f)
         if text is None:
             continue
@@ -965,7 +967,7 @@ def extract_facts(repo, stoplist=frozenset()):
             elif package and (m := PROTO_SERVICE.match(line)):
                 expose("grpc", f"{package}.{m.group(1)}", "grpc service", f"{rel}:{n}")
 
-    for f in walk(repo, {"*.tf"}):
+    for f in sorted(walk(repo, {"*.tf"})):
         text = facts_text(f)
         if text is None:
             continue

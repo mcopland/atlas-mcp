@@ -383,6 +383,20 @@ def test_terraform_yields_owned_stores_and_queues_but_skips_interpolated_names(t
 # ---------- shared rules ----------
 
 
+def test_the_yaml_cap_takes_the_same_files_whatever_order_the_walk_returns(tmp_path, monkeypatch):
+    """os.walk yields a directory's own files before it descends, so without a sort the manifests
+    that fit under the cap on a big monorepo depend on where they sit rather than on their path."""
+    monkeypatch.setattr(atlas, "FACTS_MAX_YAML_FILES", 1)
+    write(
+        tmp_path,
+        {
+            "z-root.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: from-the-root\n",
+            "a/nested.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: from-a-subdir\n",
+        },
+    )
+    assert idents(tmp_path) == {"from-a-subdir"}
+
+
 def test_every_deterministic_item_is_marked_as_such(tmp_path):
     write(tmp_path, {"main.tf": TF})
     got = atlas.extract_facts(tmp_path)
