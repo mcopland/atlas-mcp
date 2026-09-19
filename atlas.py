@@ -693,9 +693,12 @@ def yaml_scan(text):
     return docs
 
 
+def seq_item(text):
+    return text == "-" or text.startswith("- ")
+
+
 def yaml_node(items, pos, indent):
-    first = items[pos][1]
-    if first == "-" or first.startswith("- "):
+    if seq_item(items[pos][1]):
         return yaml_seq(items, pos, indent)
     return yaml_map(items, pos, indent)
 
@@ -704,7 +707,8 @@ def yaml_map(items, pos, indent):
     out = {}
     while pos < len(items) and items[pos][0] == indent:
         _, text, block = items[pos]
-        m = MAP_ENTRY.match(text)
+        # MAP_ENTRY would happily read `- host: a` as a key named `- host`.
+        m = None if seq_item(text) else MAP_ENTRY.match(text)
         if not m:
             raise ValueError(f"not a mapping entry: {text!r}")
         key, value = yaml_scalar(m.group(1)), (m.group(2) or "").strip()
@@ -715,6 +719,10 @@ def yaml_map(items, pos, indent):
             out[key] = yaml_value(value)
         elif pos < len(items) and items[pos][0] > indent:
             out[key], pos = yaml_node(items, pos, items[pos][0])
+        elif pos < len(items) and items[pos][0] == indent and seq_item(items[pos][1]):
+            # kubectl, PyYAML and kustomize all put the dash at the key's own column. yaml_seq
+            # stops at the first line that is not an item, which is this mapping's next key.
+            out[key], pos = yaml_seq(items, pos, indent)
         else:
             out[key] = None
     if pos < len(items) and items[pos][0] > indent:
@@ -726,7 +734,7 @@ def yaml_seq(items, pos, indent):
     out = []
     while pos < len(items) and items[pos][0] == indent:
         col, text, block = items[pos]
-        if text != "-" and not text.startswith("- "):
+        if not seq_item(text):
             break
         rest = text[1:].strip()
         pos += 1
@@ -770,7 +778,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 2
+FACTS_VERSION = 3
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")

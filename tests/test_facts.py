@@ -40,6 +40,39 @@ def test_parses_a_sequence_of_mappings():
     assert docs == [{"rules": [{"host": "a.example.net", "path": "/"}, {"host": "b.example.net"}]}]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "rules:\n  - host: a.example.net\n    path: /\n  - host: b.example.net\n",
+        "rules:\n- host: a.example.net\n  path: /\n- host: b.example.net\n",
+    ],
+    ids=["indented", "same-indent"],
+)
+def test_parses_a_sequence_of_mappings_in_either_indent_style(text):
+    assert atlas.parse_yaml_docs(text) == [
+        {"rules": [{"host": "a.example.net", "path": "/"}, {"host": "b.example.net"}]}
+    ]
+
+
+def test_a_same_indent_sequence_does_not_swallow_the_keys_after_it():
+    """The style kubectl, PyYAML and kustomize emit: the dash sits at the key's own column."""
+    docs = atlas.parse_yaml_docs(
+        "spec:\n  ports:\n  - port: 80\n    targetPort: 8080\n  selector:\n    app: orders\n"
+    )
+    assert docs == [
+        {"spec": {"ports": [{"port": "80", "targetPort": "8080"}], "selector": {"app": "orders"}}}
+    ]
+
+
+def test_a_same_indent_sequence_nested_inside_a_sequence_item():
+    docs = atlas.parse_yaml_docs("- name: a\n  ports:\n  - port: 80\n- name: b\n")
+    assert docs == [[{"name": "a", "ports": [{"port": "80"}]}, {"name": "b"}]]
+
+
+def test_a_sequence_item_where_a_key_is_expected_is_rejected():
+    assert atlas.parse_yaml_docs("name: orders\n- host: a.example.net\n") == []
+
+
 def test_splits_documents_on_markers():
     docs = atlas.parse_yaml_docs("kind: Service\n---\nkind: Ingress\n...\n")
     assert docs == [{"kind": "Service"}, {"kind": "Ingress"}]
@@ -163,6 +196,44 @@ def test_kubernetes_ingress_yields_every_rule_host(tmp_path):
         ("http", "orders.example.net"),
         ("http", "orders-admin.example.net"),
     }
+
+
+K8S_INDENTED = (
+    "apiVersion: v1\nkind: Service\nmetadata:\n  name: orders-api\nspec:\n  ports:\n"
+    "    - port: 80\n      targetPort: 8080\n"
+    "---\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: orders\nspec:\n"
+    "  rules:\n    - host: orders.example.net\n      http:\n        paths:\n          - path: /\n"
+)
+K8S_SAME_INDENT = (
+    "apiVersion: v1\nkind: Service\nmetadata:\n  name: orders-api\nspec:\n  ports:\n"
+    "  - port: 80\n    targetPort: 8080\n"
+    "---\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: orders\nspec:\n"
+    "  rules:\n  - host: orders.example.net\n    http:\n      paths:\n      - path: /\n"
+)
+
+
+@pytest.mark.parametrize("text", [K8S_INDENTED, K8S_SAME_INDENT], ids=["indented", "same-indent"])
+def test_kubernetes_manifests_are_read_in_either_sequence_style(tmp_path, text):
+    """`kubectl get -o yaml`, PyYAML and kustomize put the dash at the parent key's column."""
+    write(tmp_path, {"k8s/all.yaml": text})
+    assert idents(tmp_path) == {"orders-api", "orders.example.net"}
+    assert exposes(tmp_path) == {("http", "orders-api"), ("http", "orders.example.net")}
+
+
+@pytest.mark.parametrize(
+    "apis",
+    [
+        "  providesApis:\n    - orders-api\n    - orders-events\n",
+        "  providesApis:\n  - orders-api\n  - orders-events\n",
+    ],
+    ids=["indented", "same-indent"],
+)
+def test_catalog_info_apis_are_read_in_either_sequence_style(tmp_path, apis):
+    write(
+        tmp_path,
+        {"catalog-info.yaml": "kind: Component\nmetadata:\n  name: orders\nspec:\n" + apis},
+    )
+    assert idents(tmp_path) == {"orders", "orders-api", "orders-events"}
 
 
 def test_a_yaml_document_without_a_kind_is_not_read_as_kubernetes(tmp_path):
