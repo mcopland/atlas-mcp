@@ -1584,13 +1584,16 @@ def process_repo(cfg, name, repo, args):
     stamp = prompt_hash(mapper)
 
     if old and not args.full and meta.get("prompt_hash") == stamp:
-        # Nothing atlas.py reads out of a repo itself moves the prompt hash, so without the facts
-        # stamp a repo whose commit has not changed would never pick up a new extractor or a new
-        # field in _meta. A stale stamp lands in restamp, which re-reads it all without a credit.
-        if meta.get("commit") == head and meta.get("facts_version") == FACTS_VERSION:
-            return name, "skip", "up to date"
-        full_due = is_full_due(meta.get("last_full_at"), cfg["full_regen_days"])
-        if not full_due:
+        if meta.get("commit") == head:
+            # Nothing atlas.py reads out of a repo itself moves the prompt hash, so without the
+            # facts stamp a repo whose commit has not changed would never pick up a new extractor
+            # or a new field in _meta. A stale stamp restamps, which re-reads it all without a
+            # credit, even when a full regen is due: the model would see nothing new, and paying
+            # for every dormant repo after a version bump is not what the 30-day refresh is for.
+            if meta.get("facts_version") == FACTS_VERSION:
+                return name, "skip", "up to date"
+            mode = "restamp"
+        elif not is_full_due(meta.get("last_full_at"), cfg["full_regen_days"]):
             try:
                 changed = git(repo, "diff", "--name-only", meta["commit"], head).splitlines()
                 relevant = [

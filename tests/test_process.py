@@ -460,6 +460,31 @@ def test_a_stale_facts_version_restamps_instead_of_skipping(
     assert written["_meta"]["facts_version"] == atlas.FACTS_VERSION
 
 
+def test_a_stale_facts_version_restamps_even_when_a_full_regen_is_due(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """The commit has not moved, so the model would see nothing new. The full regen is for
+    entries that drifted through updates, not a reason to pay for every dormant repo in the org
+    on the first run after a FACTS_VERSION bump."""
+    repo = make_repo("svc", files={"k8s/svc.yaml": SERVICE})
+    cfg = make_cfg()
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    seed(
+        cfg,
+        make_manifest,
+        repo,
+        "svc",
+        head,
+        facts_version=atlas.FACTS_VERSION - 1,
+        last_full_at="2020-01-01T00:00:00+00:00",
+    )
+    _, mode, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    assert stub_kiro == []
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["identifiers"] == ["orders-api"]
+
+
 def test_meta_records_the_remote_url_and_the_last_commit_date(
     make_repo, make_cfg, make_manifest, gen_args, stub_kiro
 ):
