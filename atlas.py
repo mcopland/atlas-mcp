@@ -260,7 +260,9 @@ def normalize_remote(url):
     """One clickable https form whatever the clone used, with any embedded credential dropped:
     this URL is written to graph.json and read back by a model. A path or a scheme that has no
     web form is left alone rather than guessed at."""
-    url = URL_CREDENTIALS.sub("://", url.strip())
+    # Any userinfo goes, not only user:pass. A token clone is `https://TOKEN@host/...`, and
+    # this value is written to graph.json and read back by a model.
+    url = re.sub(r"://[^/@\s]+@", "://", url.strip())
     if m := re.fullmatch(r"(?:ssh|git)://(?:[^@/]+@)?(.+)", url):
         url = "https://" + m.group(1)
     elif m := re.fullmatch(r"(?:[\w.\-]+@)?([\w.\-]+):(?!/)(\S+)", url):  # scp form

@@ -9,6 +9,9 @@ import atlas
         ("https://github.com/org/orders.git", "https://github.com/org/orders"),
         ("https://github.com/org/orders", "https://github.com/org/orders"),
         ("https://x-token:abc123@github.com/org/orders.git", "https://github.com/org/orders"),
+        # the form GitHub documents for token clones: a userinfo with no password part
+        ("https://ghp_abc123@github.com/org/orders.git", "https://github.com/org/orders"),
+        ("https://user@ghe.corp/org/orders", "https://ghe.corp/org/orders"),
         ("git@github.com:org/orders.git", "https://github.com/org/orders"),
         ("ssh://git@ghe.corp:2222/org/orders.git", "https://ghe.corp:2222/org/orders"),
         ("git://ghe.corp/org/orders.git", "https://ghe.corp/org/orders"),
