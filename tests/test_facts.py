@@ -295,6 +295,23 @@ def test_openapi_ignores_a_prose_title(tmp_path):
     assert atlas.extract_facts(tmp_path)["identifiers"] == []
 
 
+@pytest.mark.parametrize(
+    "url,want",
+    [
+        ("/api/v1", set()),
+        ("{scheme}://{host}/v2", set()),
+        ("orders.internal", set()),
+        ("https://api.example.net/{version}", {"api.example.net"}),
+    ],
+)
+def test_openapi_servers_without_a_real_host_yield_nothing(tmp_path, url, want):
+    """Relative and templated server urls are the usual forms in a spec that sits next to the
+    code, and neither names a host a consumer could match on."""
+    write(tmp_path, {"openapi.yaml": f"openapi: 3.0.0\nservers:\n  - url: {json.dumps(url)}\n"})
+    assert idents(tmp_path) == want
+    assert exposes(tmp_path) == {("http", host) for host in want}
+
+
 def test_openapi_json_is_read_too(tmp_path):
     write(
         tmp_path,

@@ -879,9 +879,13 @@ def extract_facts(repo, stoplist=frozenset()):
             ident(title)
         servers = doc.get("servers")
         for server in servers if isinstance(servers, list) else []:
-            url = server.get("url") if isinstance(server, dict) else server
+            url = str((server.get("url") if isinstance(server, dict) else server) or "")
+            # A relative url (`/api/v1`) names no host, and svc_forms would hand it back whole.
+            if not re.match(r"[a-z][a-z0-9+.\-]*://", url.strip().lower()):
+                continue
             host = svc_forms(url)[0]
-            if host and not noisy_host(host):
+            # `{scheme}://{host}` is a template, not a host a consumer could match on.
+            if host and "{" not in host and not noisy_host(host):
                 expose("http", host, "openapi server", rel)
 
     for rel in CODEOWNERS_PATHS:
