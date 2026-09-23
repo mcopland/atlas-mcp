@@ -800,3 +800,35 @@ def test_the_first_matching_domain_glob_wins(make_repo, make_cfg, gen_args, monk
     atlas.process_repo(cfg, "orders-api", repo, gen_args)
     written = json.loads((cfg["atlas_dir"] / "repos" / "orders-api.json").read_text())
     assert written["domain"] == "identity"
+
+
+def test_secrets_the_model_writes_are_redacted_before_the_entry_is_saved(
+    make_repo, make_cfg, gen_args, monkeypatch
+):
+    token = "ghp_" + "a" * 36
+    repo = make_repo("svc", files={"main.go": "package main"})
+    cfg = make_cfg()
+
+    def leaky(cfg, repo, prompt, log_path, mapper="explore"):
+        return {
+            "summary": "s",
+            "overview": f"calls orders with {token}",
+            "notes": [f"export GITHUB_TOKEN={token}"],
+            "consumes": [
+                {"kind": "http", "key": "orders", "detail": token, "evidence": "main.go"}
+            ],
+        }
+
+    monkeypatch.setattr(atlas, "run_kiro", leaky)
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    written = (cfg["atlas_dir"] / "repos" / "svc.json").read_text()
+    assert token not in written
+    m = json.loads(written)
+    assert m["overview"] == "calls orders with <redacted>"
+    assert m["consumes"][0]["evidence"] == "main.go"
+
+
+def test_redacting_model_output_leaves_evidence_paths_alone():
+    m = {"exposes": [{"key": "a", "evidence": "secrets.yaml:3"}], "notes": ["TOKEN: abc"]}
+    atlas.redact_manifest(m)
+    assert m == {"exposes": [{"key": "a", "evidence": "secrets.yaml:3"}], "notes": ["TOKEN: <redacted>"]}

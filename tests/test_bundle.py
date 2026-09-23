@@ -66,6 +66,36 @@ import atlas
             'hook = "https://hooks.example.com/services/team/channel"',
             'hook = "https://hooks.example.com/services/team/channel"',
         ),
+        ("DB_PWD=hunter2", "DB_PWD=<redacted>"),
+        (
+            "DB_CONNECTION_STRING=Server=db.internal;Password=x",
+            "DB_CONNECTION_STRING=Server=db.internal;Password=<redacted>",
+        ),
+        (
+            'dsn := "postgres://db.internal:5432/orders"',
+            'dsn := "postgres://db.internal:5432/orders"',
+        ),
+        ("storage_account_key: abc", "storage_account_key: <redacted>"),
+        (
+            'conn = "Server=db.internal;User Id=app;Password=hunter2;"',
+            'conn = "Server=db.internal;User Id=app;Password=<redacted>;"',
+        ),
+        (
+            "conn = DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abc+def/ghi==;",
+            "conn = DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=<redacted>;",
+        ),
+        ("# token glpat-" + "a" * 20, "# token <redacted>"),
+        ("//registry/:_authToken=npm_" + "a" * 36, "//registry/:_authToken=<redacted>"),
+        ("stripe: sk_live_" + "a" * 24, "stripe: <redacted>"),
+        ("restricted: rk_live_" + "a" * 24, "restricted: <redacted>"),
+        ("anthropic: sk-ant-api03-" + "a" * 40, "anthropic: <redacted>"),
+        ("openai: sk-proj-" + "a" * 40, "openai: <redacted>"),
+        (
+            "PASSPORT_SERVICE_URL=http://passport.internal",
+            "PASSPORT_SERVICE_URL=http://passport.internal",
+        ),
+        ("AUTH_SERVICE_URL=http://auth.internal", "AUTH_SERVICE_URL=http://auth.internal"),
+        ("npm_config_registry=https://registry.internal", "npm_config_registry=https://registry.internal"),
     ],
 )
 def test_redact_masks_secret_values_and_leaves_other_lines_alone(line, expected):
@@ -87,6 +117,17 @@ def test_redact_masks_a_private_key_block():
     assert "-----BEGIN RSA PRIVATE KEY-----" in got
     assert "-----END RSA PRIVATE KEY-----" in got
     assert '"https://orders.internal"' in got
+
+
+def test_redact_masks_a_pgp_private_key_block():
+    text = (
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+        "lQOYBF0Ab0kBCAC7pgpbodymarker\n"
+        "-----END PGP PRIVATE KEY BLOCK-----\n"
+    )
+    got = atlas.redact(text)
+    assert "lQOYBF0Ab0kBCAC7pgpbodymarker" not in got
+    assert "-----BEGIN PGP PRIVATE KEY BLOCK-----" in got
 
 
 def test_redact_masks_a_private_key_block_the_file_cuts_short():

@@ -123,18 +123,21 @@ PROMPTS = {"explore": ("full.md", "update.md"), "bundle": ("bundle_full.md", "bu
 DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle"}
 BUNDLE_MARGIN_BYTES = 2 * 1024
 SECRET_ASSIGNMENT = re.compile(
-    r"""^(\s*(?:export\s+)?["']?[\w.\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)
+    r"""^(\s*(?:export\s+)?["']?[\w.\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|ACCOUNT_?KEY|CREDENTIAL)
         [\w.\-]*["']?\s*[=:]\s*)(\S.*)$""",
     re.IGNORECASE | re.MULTILINE | re.VERBOSE,
 )
 # Anchored on the literal "://" so the scan can skip ahead: a leading `\w[\w+.\-]*` would
 # start at every character of a long token and backtrack, which is quadratic on minified files.
 URL_CREDENTIALS = re.compile(r"://[^/\s@:]+:[^/\s@]*@")
+# ADO.NET and Azure connection strings put the secret mid-line, after a `;`, where the
+# line-anchored assignment rule cannot see it.
+CONN_STRING_SECRET = re.compile(r"(?i)(\b(?:password|pwd|accountkey|sharedaccesskey)=)[^;\s\"']+")
 OPAQUE_LITERAL = re.compile(r"""(?<=["'])[A-Za-z0-9_\-]{32,}(?=["'])""")
 # The markers are kept so the bundle still says a key lives here; only the body goes. Ending on
 # \Z as well covers a block the file cuts short, which is what a truncated read leaves behind.
 PEM_BLOCK = re.compile(
-    r"(-----BEGIN [A-Z ]*PRIVATE KEY-----).*?(-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    r"(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----).*?(-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
     re.DOTALL,
 )
 # These carry their own prefix, so they are recognisable with neither an assignment nor a quoted
@@ -149,6 +152,11 @@ PROVIDER_SECRET = re.compile(
       | AIza[0-9A-Za-z_\-]{35}                                              # Google API key
       | https://hooks\.slack\.com/services/[A-Za-z0-9/+]{20,}               # Slack webhook
       | eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,} # JWT
+      | glpat-[A-Za-z0-9_\-]{20,}                                           # GitLab PAT
+      | npm_[A-Za-z0-9]{36}                                                 # npm token
+      | sk_live_[A-Za-z0-9]{24,} | rk_live_[A-Za-z0-9]{24,}                 # Stripe key
+      | sk-ant-[A-Za-z0-9_\-]{20,}                                          # Anthropic key
+      | sk-proj-[A-Za-z0-9_\-]{20,}                                         # OpenAI key
     )""",
     re.VERBOSE,
 )
@@ -1374,8 +1382,23 @@ def redact(text):
     text = PEM_BLOCK.sub(r"\1\n<redacted>\n\2", text)
     text = SECRET_ASSIGNMENT.sub(r"\g<1><redacted>", text)
     text = URL_CREDENTIALS.sub("://<redacted>@", text)
+    text = CONN_STRING_SECRET.sub(r"\g<1><redacted>", text)
     text = PROVIDER_SECRET.sub("<redacted>", text)
     return OPAQUE_LITERAL.sub(opaque, text)
+
+
+def redact_manifest(value, key=None):
+    """redact() over every string the model wrote. The input was redacted, but a secret that
+    slipped past it, or one read with the explore-mode read tool, would otherwise be served to
+    every agent through MCP. Evidence is a repo path and is left intact for the evidence gate."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            value[k] = redact_manifest(v, k)
+    elif isinstance(value, list):
+        value[:] = [redact_manifest(v, key) for v in value]
+    elif isinstance(value, str) and key != "evidence":
+        return redact(value)
+    return value
 
 
 def domain_for(cfg, name):
@@ -1676,6 +1699,7 @@ def process_repo(cfg, name, repo, args):
         except ValueError:
             manifest = run_kiro(cfg, repo, prompt, log, mapper)  # one retry on unparseable output
 
+    redact_manifest(manifest)
     # Merged before the gate, so a parser that emits a path the repo does not have shows up in
     # dropped_without_evidence instead of reaching the graph unchallenged.
     facts = extract_facts(repo, cfg["generic_identifiers"])
