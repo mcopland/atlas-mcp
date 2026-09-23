@@ -122,6 +122,7 @@ TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 PROMPTS = {"explore": ("full.md", "update.md"), "bundle": ("bundle_full.md", "bundle_update.md")}
 DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle"}
 BUNDLE_MARGIN_BYTES = 2 * 1024
+REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SECRET_ASSIGNMENT = re.compile(
     r"""^(\s*(?:export\s+)?["']?[\w.\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|ACCOUNT_?KEY|CREDENTIAL)
         [\w.\-]*["']?\s*[=:]\s*)(\S.*)$""",
@@ -242,6 +243,20 @@ def load_config(path):
     budget = cfg["bundle_budget_bytes"]
     if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
         sys.exit(f"bundle_budget_bytes must be a positive integer, got {budget!r}")
+    for arg in cfg["kiro_extra_args"]:
+        if str(arg).startswith("--trust-all"):
+            sys.exit(
+                f"kiro_extra_args must not contain {arg!r}: it pre-approves every tool, including "
+                "shell and write, for a model reading untrusted repo content. Use a narrow "
+                "--trust-tools list instead."
+            )
+    # A repo name becomes a file name under repos/, docs/ and logs/.
+    for path, name in (cfg["repo_names"] or {}).items():
+        if not REPO_NAME.fullmatch(str(name)):
+            sys.exit(
+                f"repo_names[{path!r}] = {name!r} is not a plain name; use letters, digits, "
+                "'.', '_' and '-', starting with a letter or digit"
+            )
     # None means "pick the agent that matches each repo's mapper mode"; "" means "pass no --agent".
     cfg.setdefault("kiro_agent", None)
     cfg["generic_identifiers"] = {

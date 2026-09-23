@@ -400,3 +400,24 @@ def test_a_real_run_still_blocks_on_a_held_lock(make_repo, make_cfg, monkeypatch
     with atlas.atlas_lock(cfg["atlas_dir"]), pytest.raises(SystemExit) as e:
         atlas.cmd_generate(cfg, _gen_args())
     assert "another atlas run" in str(e.value)
+
+
+@pytest.mark.parametrize("arg", ["--trust-all-tools", "--trust-all-tools=true"])
+def test_load_config_rejects_trusting_every_tool(make_cfg, arg):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(kiro_extra_args=["--verbose", arg])
+    assert "kiro_extra_args" in str(e.value)
+    assert arg in str(e.value)
+
+
+@pytest.mark.parametrize("name", ["../escape", "a/b", "", ".hidden", "a b"])
+def test_load_config_rejects_a_repo_name_that_is_not_a_plain_file_name(make_cfg, name):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(repo_names={"/abs/clone": name})
+    assert "repo_names" in str(e.value)
+
+
+def test_load_config_accepts_a_plain_repo_name(make_cfg):
+    cfg = make_cfg(repo_names={"/abs/clone": "orders-service.v2_x"})
+    assert cfg["repo_names"] == {"/abs/clone": "orders-service.v2_x"}
+
