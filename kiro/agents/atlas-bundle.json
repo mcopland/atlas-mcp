@@ -3,6 +3,9 @@
   "description": "Tool-free agent used by atlas.py to turn one prepared repo bundle into an atlas entry. It reads nothing and runs nothing.",
   "tools": [],
   "allowedTools": [],
+  "permissions": {
+    "rules": [{ "capability": "all", "match": ["*"], "effect": "deny" }]
+  },
   "includeMcpJson": false,
   "mcpServers": {},
   "resources": []

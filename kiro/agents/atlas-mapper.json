@@ -1,8 +1,37 @@
 {
   "name": "atlas-mapper",
-  "description": "Read-only agent used by atlas.py to map one repo. No MCP servers, no writes, no shell.",
+  "description": "Read-only agent used by atlas.py to map one repo. No MCP servers, no writes, no shell, no credential files.",
   "tools": ["read"],
   "allowedTools": ["read"],
+  "permissions": {
+    "rules": [
+      {
+        "capability": "fs_read",
+        "match": [
+          "**/.ssh/**",
+          "**/.aws/**",
+          "**/.kube/**",
+          "**/.gnupg/**",
+          "**/.docker/**",
+          "**/.config/**",
+          "**/.kiro/**",
+          "**/.netrc",
+          "**/.npmrc",
+          "**/.pypirc",
+          "**/.git-credentials",
+          "**/.env",
+          "**/.env.*",
+          "**/*.pem",
+          "**/*.key",
+          "**/id_rsa*",
+          "**/id_ecdsa*",
+          "**/id_ed25519*"
+        ],
+        "exclude": ["**/.env.example", "**/.env.sample", "**/.env.template"],
+        "effect": "deny"
+      }
+    ]
+  },
   "includeMcpJson": false,
   "mcpServers": {},
   "resources": []
