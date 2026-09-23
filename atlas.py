@@ -438,6 +438,7 @@ def save_repo_map(cfg, repos):
 
 
 def walk(repo, filenames, max_depth=4):
+    root = repo.resolve()
     for dirpath, dirnames, files in os.walk(repo):
         depth = len(Path(dirpath).relative_to(repo).parts)
         dirnames[:] = (
@@ -447,7 +448,8 @@ def walk(repo, filenames, max_depth=4):
         )
         for f in files:
             if f in filenames or any(fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat):
-                yield Path(dirpath) / f
+                if contained(root, Path(dirpath) / f):
+                    yield Path(dirpath) / f
 
 
 def norm_pkg(eco, name):
@@ -550,8 +552,8 @@ def extract_packages(repo):
                 group = re.search(r"""^\s*group\s*=?\s*['"]([^'"]+)['"]""", text, re.MULTILINE)
                 root_name = ""
                 for settings in ("settings.gradle", "settings.gradle.kts"):
-                    path = f.parent / settings
-                    if path.exists():
+                    path = inside_repo(repo, f.parent.relative_to(repo) / settings)
+                    if path is not None:
                         m = re.search(
                             r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""",
                             path.read_text(encoding="utf-8", errors="replace"),
@@ -890,7 +892,7 @@ def extract_facts(repo, stoplist=frozenset()):
                 expose("http", host, "openapi server", rel)
 
     for rel in CODEOWNERS_PATHS:
-        if (text := facts_text(repo / rel)) is not None:
+        if (path := inside_repo(repo, rel)) and (text := facts_text(path)) is not None:
             for owner in codeowners_rule(text):
                 own(owner)
             break
@@ -1182,7 +1184,7 @@ def bundle_path_ok(rel, repo):
         return False
     if any(d in SKIP_DIRS or (d.startswith(".") and d not in BUNDLE_DOT_DIRS) for d in parts[:-1]):
         return False
-    return (repo / rel).is_file()
+    return inside_repo(repo, rel) is not None
 
 
 def tracked_files(repo):
@@ -1225,6 +1227,8 @@ def walked_files(repo):
             )
         )
         for f in sorted(files):
+            if inside_repo(repo, rel_dir / f) is None:
+                continue
             out.append((rel_dir / f).as_posix())
             if len(out) >= BUNDLE_MAX_FILES:
                 return sorted(out)
@@ -1521,14 +1525,26 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
     return parse_output(ANSI.sub("", r.stdout or ""))
 
 
+def contained(root, path):
+    """`path` with every symlink resolved, or None when that lands outside the resolved `root`.
+    Repo content is untrusted: a committed `README.md -> ~/.aws/credentials` must not be read
+    into a prompt, and a repo reached through a symlinked parent must still contain its files."""
+    root, target = root.resolve(), path.resolve()
+    return target if target == root or root in target.parents else None
+
+
+def inside_repo(repo, rel):
+    """The regular file `rel` names, if it is one and it stays inside the repo."""
+    target = contained(repo, repo / rel)
+    return target if target is not None and target.is_file() else None
+
+
 def evidence_ok(repo, evidence):
     m = re.match(r"^\s*([^\s:#]+)", str(evidence or ""))
     if not m:
         return False
-    rel = m.group(1)
-    rel = rel.removeprefix("./")
-    target = (repo / rel).resolve()
-    return target.exists() and (target == repo or repo in target.parents)
+    target = contained(repo, repo / m.group(1).removeprefix("./"))
+    return target is not None and target.exists()
 
 
 def clean_manifest(m, repo, cfg):
