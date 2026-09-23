@@ -2285,6 +2285,11 @@ def main():
     sub.add_parser("status")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    # Logs hold raw model output and manifests describe internal systems: owner-only, and the
+    # chmod covers an atlas created before this existed.
+    os.umask(0o077)
+    cfg["atlas_dir"].mkdir(parents=True, exist_ok=True)
+    cfg["atlas_dir"].chmod(0o700)
     {
         "generate": cmd_generate,
         "build": cmd_build,

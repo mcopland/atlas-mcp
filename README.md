@@ -62,6 +62,8 @@ Both modes redact before the model sees anything: private key blocks (PEM and PG
 
 Both modes record the prompt hash they were generated with. Editing a prompt or the schema therefore regenerates every entry in full on the next run, rather than leaving a mix of old and new shapes in the atlas until the 30-day full regeneration comes round. Entries also record `_meta.facts_version`; changing anything `atlas.py` reads out of a repo itself bumps it, whether that is a deterministic extractor or a new field in `_meta`, and a repo that would otherwise have been skipped restamps instead, which re-reads it all without a model call. That is also why CODEOWNERS staying inside `ignore_changes` costs nothing: an owners-only commit refreshes the owners on the free path.
 
+Every `atlas.py` command creates what it writes with an owner-only umask and sets `atlas_dir` itself to `0700`: logs hold raw model output and the manifests describe internal systems.
+
 ## 4. Pilot, then full run
 
 ```bash

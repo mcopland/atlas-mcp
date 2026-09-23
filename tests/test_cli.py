@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import stat
 
 import pytest
 
@@ -421,3 +422,30 @@ def test_load_config_accepts_a_plain_repo_name(make_cfg):
     cfg = make_cfg(repo_names={"/abs/clone": "orders-service.v2_x"})
     assert cfg["repo_names"] == {"/abs/clone": "orders-service.v2_x"}
 
+
+@pytest.fixture
+def restore_umask():
+    old = os.umask(0o022)
+    os.umask(old)
+    yield
+    os.umask(old)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_main_keeps_the_atlas_private_to_its_owner(
+    make_repo, make_cfg, monkeypatch, tmp_path, restore_umask
+):
+    make_repo("svc")
+    cfg = make_cfg()
+    cfg["atlas_dir"].mkdir(mode=0o755)
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    monkeypatch.setattr(
+        "sys.argv", ["atlas.py", "--config", str(tmp_path / "config.json"), "generate"]
+    )
+    with pytest.raises(SystemExit) as e:
+        atlas.main()
+    assert e.value.code == 0
+    ad = cfg["atlas_dir"]
+    assert stat.S_IMODE(ad.stat().st_mode) == 0o700
+    for path in (ad / "repos" / "svc.json", ad / "graph.json", ad / "docs" / "svc.md"):
+        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0, path
