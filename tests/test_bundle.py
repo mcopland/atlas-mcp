@@ -46,8 +46,10 @@ import atlas
         ("slack = xoxb-123456789012-abcdefghijkl", "slack = <redacted>"),
         ("google = AIza" + "b" * 35, "google = <redacted>"),
         (
-            "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
-            ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            (
+                "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+                ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+            ),
             "Bearer <redacted>",
         ),
         (
@@ -95,7 +97,10 @@ import atlas
             "PASSPORT_SERVICE_URL=http://passport.internal",
         ),
         ("AUTH_SERVICE_URL=http://auth.internal", "AUTH_SERVICE_URL=http://auth.internal"),
-        ("npm_config_registry=https://registry.internal", "npm_config_registry=https://registry.internal"),
+        (
+            "npm_config_registry=https://registry.internal",
+            "npm_config_registry=https://registry.internal",
+        ),
     ],
 )
 def test_redact_masks_secret_values_and_leaves_other_lines_alone(line, expected):

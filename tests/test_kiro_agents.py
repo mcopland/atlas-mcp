@@ -21,14 +21,25 @@ def denied_reads(agent):
 
 @pytest.mark.parametrize(
     "pattern",
-    ["**/.ssh/**", "**/.aws/**", "**/.kube/**", "**/.gnupg/**", "**/.netrc", "**/.kiro/**", "**/.env", "**/.env.*"],
+    [
+        "**/.ssh/**",
+        "**/.aws/**",
+        "**/.kube/**",
+        "**/.gnupg/**",
+        "**/.netrc",
+        "**/.kiro/**",
+        "**/.env",
+        "**/.env.*",
+    ],
 )
 def test_the_explore_mapper_denies_reading_credential_locations(pattern):
     assert pattern in denied_reads(load("atlas-mapper"))
 
 
 def test_the_explore_mapper_can_still_read_env_examples():
-    rule = next(r for r in load("atlas-mapper")["permissions"]["rules"] if "**/.env.*" in r["match"])
+    rule = next(
+        r for r in load("atlas-mapper")["permissions"]["rules"] if "**/.env.*" in r["match"]
+    )
     assert {"**/.env.example", "**/.env.sample", "**/.env.template"} <= set(rule.get("exclude", []))
 
 

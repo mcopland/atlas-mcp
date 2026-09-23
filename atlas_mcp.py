@@ -333,6 +333,7 @@ def freshness(name: str = "") -> str:
                 text=True,
                 stdin=subprocess.DEVNULL,
                 timeout=5,
+                check=False,
             ).stdout.strip()
             if not head:
                 row["status"] = "missing"
@@ -354,6 +355,7 @@ def freshness(name: str = "") -> str:
                         text=True,
                         stdin=subprocess.DEVNULL,
                         timeout=5,
+                        check=False,
                     ).stdout.strip()
                     row["commits_behind"] = int(behind) if behind.isdigit() else None
         except (OSError, ValueError, subprocess.SubprocessError) as e:

@@ -814,9 +814,7 @@ def test_secrets_the_model_writes_are_redacted_before_the_entry_is_saved(
             "summary": "s",
             "overview": f"calls orders with {token}",
             "notes": [f"export GITHUB_TOKEN={token}"],
-            "consumes": [
-                {"kind": "http", "key": "orders", "detail": token, "evidence": "main.go"}
-            ],
+            "consumes": [{"kind": "http", "key": "orders", "detail": token, "evidence": "main.go"}],
         }
 
     monkeypatch.setattr(atlas, "run_kiro", leaky)
@@ -831,4 +829,7 @@ def test_secrets_the_model_writes_are_redacted_before_the_entry_is_saved(
 def test_redacting_model_output_leaves_evidence_paths_alone():
     m = {"exposes": [{"key": "a", "evidence": "secrets.yaml:3"}], "notes": ["TOKEN: abc"]}
     atlas.redact_manifest(m)
-    assert m == {"exposes": [{"key": "a", "evidence": "secrets.yaml:3"}], "notes": ["TOKEN: <redacted>"]}
+    assert m == {
+        "exposes": [{"key": "a", "evidence": "secrets.yaml:3"}],
+        "notes": ["TOKEN: <redacted>"],
+    }

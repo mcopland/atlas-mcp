@@ -410,8 +410,10 @@ def test_every_deterministic_item_is_marked_as_such(tmp_path):
     [
         (
             "catalog-info.yaml",
-            "apiVersion: b/v1\nkind: Component\nmetadata:\n  name: orders\n"
-            "spec:\n  providesApis: orders-api\n",
+            (
+                "apiVersion: b/v1\nkind: Component\nmetadata:\n  name: orders\n"
+                "spec:\n  providesApis: orders-api\n"
+            ),
             ["orders"],
         ),
         ("openapi.yaml", "openapi: 3.0.0\nservers: https://orders.example.net\n", []),

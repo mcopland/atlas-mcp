@@ -251,10 +251,10 @@ def load_config(path):
                 "--trust-tools list instead."
             )
     # A repo name becomes a file name under repos/, docs/ and logs/.
-    for path, name in (cfg["repo_names"] or {}).items():
+    for clone, name in (cfg["repo_names"] or {}).items():
         if not REPO_NAME.fullmatch(str(name)):
             sys.exit(
-                f"repo_names[{path!r}] = {name!r} is not a plain name; use letters, digits, "
+                f"repo_names[{clone!r}] = {name!r} is not a plain name; use letters, digits, "
                 "'.', '_' and '-', starting with a letter or digit"
             )
     # None means "pick the agent that matches each repo's mapper mode"; "" means "pass no --agent".
@@ -274,6 +274,7 @@ def git(repo, *args, timeout=60, errors=None):
         errors=errors,
         stdin=subprocess.DEVNULL,
         timeout=timeout,
+        check=False,
     )
     if r.returncode:
         raise RuntimeError(r.stderr.strip() or f"git {' '.join(args)} failed")
@@ -470,9 +471,11 @@ def walk(repo, filenames, max_depth=4):
             else [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
         )
         for f in files:
-            if f in filenames or any(fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat):
-                if contained(root, Path(dirpath) / f):
-                    yield Path(dirpath) / f
+            wanted = f in filenames or any(
+                fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat
+            )
+            if wanted and contained(root, Path(dirpath) / f):
+                yield Path(dirpath) / f
 
 
 def norm_pkg(eco, name):
@@ -1498,7 +1501,8 @@ def parse_output(text):
         except json.JSONDecodeError:
             continue
         if not isinstance(data, dict):
-            raise ValueError("ATLAS_JSON block is not an object")
+            # ValueError, not TypeError: process_repo retries a bad answer on ValueError.
+            raise ValueError("ATLAS_JSON block is not an object")  # noqa: TRY004
         return data
     raise ValueError("no parseable <<<ATLAS_JSON block in Kiro output")
 
@@ -1540,6 +1544,7 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
             text=True,
             timeout=cfg["timeout_minutes"] * 60,
             env={**os.environ, "NO_COLOR": "1"},
+            check=False,
         )
     except subprocess.TimeoutExpired as e:
         partial = (
@@ -1800,11 +1805,12 @@ def check_meta(m):
     """Manifests are documented as editable JSON and orphan snapshots get restored by hand,
     so a hand-edited file must be skipped with a warning rather than taking the whole build
     down with a KeyError from render_docs or the graph."""
+    # ValueError, not TypeError: callers skip a bad manifest on the ValueError that bad JSON raises.
     if not isinstance(m, dict):
-        raise ValueError("manifest is not a JSON object")
+        raise ValueError("manifest is not a JSON object")  # noqa: TRY004
     meta = m.get("_meta")
     if not isinstance(meta, dict):
-        raise ValueError("missing _meta")
+        raise ValueError("missing _meta")  # noqa: TRY004
     missing = [k for k in META_FIELDS if not meta.get(k)]
     if missing:
         raise ValueError(f"incomplete metadata: _meta is missing {', '.join(missing)}")
@@ -2162,7 +2168,9 @@ def cmd_generate(cfg, args):
                     counts[mode] = counts.get(mode, 0) + 1
                     prompt_bytes += sent
                     print(f"  {name}: {mode} ({msg})")
-                except Exception as e:
+                # Per-repo boundary: one repo failing in an unforeseen way must not abort the
+                # run and skip the graph build for every other repo. The error is reported.
+                except Exception as e:  # noqa: BLE001
                     errors += 1
                     print(f"  {futures[fut]}: ERROR {e}", file=sys.stderr)
         modes = (
