@@ -1707,7 +1707,7 @@ def process_repo(cfg, name, repo, args):
     # Read after the skip and dry-run branches, so neither pays for a subprocess it cannot use.
     remote_url = repo_remote_url(repo)
     last_commit_at = repo_last_commit_at(repo)
-    prompt_bytes = 0
+    prompt_bytes, attempts = 0, 0
     if mode == "restamp":
         manifest = {k: v for k, v in old.items() if k != "_meta"}
     else:
@@ -1740,10 +1740,13 @@ def process_repo(cfg, name, repo, args):
             prompt = mapper_prompt(cfg, repo, mapper, full_template, {})
         prompt_bytes = len(prompt.encode("utf-8"))
         log = cfg["atlas_dir"] / "logs" / f"{name}.log"
+        attempts = 1
         try:
             manifest = run_kiro(cfg, repo, prompt, log, mapper)
         except ValueError:
-            manifest = run_kiro(cfg, repo, prompt, log, mapper)  # one retry on unparseable output
+            attempts = 2  # one retry on unparseable output; the same prompt is sent again
+            manifest = run_kiro(cfg, repo, prompt, log, mapper)
+        prompt_bytes *= attempts
 
     redact_manifest(manifest)
     # Merged before the gate, so a parser that emits a path the repo does not have shows up in
@@ -1773,6 +1776,7 @@ def process_repo(cfg, name, repo, args):
         "domain_rejected": rejected,
         "prompt_hash": stamp,
         "prompt_bytes": prompt_bytes,
+        "attempts": attempts,
         "facts_version": FACTS_VERSION,
         # identifiers and owners are plain strings and cannot carry a per-item source key, so
         # the next run needs this record to tell last run's deterministic names from the model's.

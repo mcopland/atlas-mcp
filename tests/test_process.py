@@ -167,6 +167,28 @@ def test_unparseable_output_is_retried_once_then_reported(
     assert len(attempts) == 2
 
 
+def test_a_retried_attempt_is_counted_in_prompt_bytes(make_repo, make_cfg, gen_args, monkeypatch):
+    """The summary line and _meta.prompt_bytes are how README users reconcile a run against
+    the Kiro dashboard; a retry sends the same prompt again and must not be free."""
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    calls = []
+
+    def bad_then_good(cfg_, repo_, prompt, log_path, mapper="explore"):
+        calls.append(prompt)
+        if len(calls) == 1:
+            raise ValueError("no ATLAS_JSON block")
+        return {"summary": "s", "domain": "unassigned", "kind": "service"}
+
+    monkeypatch.setattr(atlas, "run_kiro", bad_then_good)
+    _, mode, _, prompt_bytes = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "full"
+    assert len(calls) == 2
+    assert prompt_bytes == 2 * len(calls[0].encode("utf-8"))
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["_meta"]["attempts"] == 2
+
+
 def test_parse_output_reads_the_last_block():
     text = 'noise\n<<<ATLAS_JSON\n{"a": 1}\nATLAS_JSON>>>\n'
     assert atlas.parse_output(text) == {"a": 1}
