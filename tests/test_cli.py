@@ -54,6 +54,25 @@ def test_load_config_rejects_a_bundle_budget_that_is_not_a_positive_int(make_cfg
     assert "bundle_budget_bytes" in str(e.value)
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "parallel",
+        "timeout_minutes",
+        "full_regen_days",
+        "max_changed_files_for_update",
+        "max_ambiguous_hits",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1, "3", None, True])
+def test_load_config_rejects_a_non_positive_int_numeric_key(make_cfg, key, value):
+    """parallel: 0 used to surface as a ThreadPoolExecutor traceback, and a string
+    timeout_minutes failed every repo inside its worker thread instead of at startup."""
+    with pytest.raises(SystemExit) as e:
+        make_cfg(**{key: value})
+    assert key in str(e.value)
+
+
 def test_config_extends_the_generic_identifier_stoplist(make_cfg):
     cfg = make_cfg(generic_identifiers=["Orders"])
     assert "orders" in cfg["generic_identifiers"]
@@ -459,6 +478,26 @@ def restore_umask():
     os.umask(old)
     yield
     os.umask(old)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_generate_rejects_a_non_positive_limit(
+    make_repo, make_cfg, monkeypatch, tmp_path, value, capsys
+):
+    """items[:args.limit] would silently accept a negative limit (a slice, not an error) and
+    quietly select from the tail of the list instead of failing loudly at the CLI boundary."""
+    make_repo("a")
+    make_repo("b")
+    make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["atlas.py", "--config", str(tmp_path / "config.json"), "generate", "--limit", value],
+    )
+    with pytest.raises(SystemExit) as e:
+        atlas.main()
+    assert e.value.code == 2  # argparse's own usage-error exit code
+    assert "--limit" in capsys.readouterr().err
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")

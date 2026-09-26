@@ -240,9 +240,20 @@ def load_config(path):
         sys.exit(
             f"unknown mapper_mode {cfg['mapper_mode']!r}; expected one of {', '.join(sorted(PROMPTS))}"
         )
-    budget = cfg["bundle_budget_bytes"]
-    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
-        sys.exit(f"bundle_budget_bytes must be a positive integer, got {budget!r}")
+    # parallel feeds ThreadPoolExecutor(max_workers=...), which raises on 0; timeout_minutes and
+    # the rest are arithmetic on every repo, in a worker thread, so a bad value there surfaces
+    # as a per-repo failure far from this config load rather than a clear message at startup.
+    for key in (
+        "bundle_budget_bytes",
+        "parallel",
+        "timeout_minutes",
+        "full_regen_days",
+        "max_changed_files_for_update",
+        "max_ambiguous_hits",
+    ):
+        value = cfg[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            sys.exit(f"{key} must be a positive integer, got {value!r}")
     for arg in cfg["kiro_extra_args"]:
         if str(arg).startswith("--trust-all"):
             sys.exit(
@@ -2310,6 +2321,15 @@ def cmd_status(cfg, _args):
         print(f"  {name}: orphan (no matching clone; run atlas.py prune)")
 
 
+def positive_int(raw):
+    # items[:n] treats a non-positive n as a slice, not an error, and would otherwise silently
+    # select from the tail of the list or select nothing at all rather than failing loudly here.
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {raw!r}")
+    return value
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -2318,7 +2338,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate")
     g.add_argument("--only", nargs="+")
-    g.add_argument("--limit", type=int)
+    g.add_argument("--limit", type=positive_int)
     g.add_argument("--full", action="store_true", help="ignore existing manifests and regenerate")
     g.add_argument("--pull", action="store_true", help="git pull --ff-only each repo first")
     g.add_argument("--dry-run", action="store_true", help="show what would run, spend nothing")
