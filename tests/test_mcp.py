@@ -317,6 +317,21 @@ def test_search_ignores_short_terms(loaded):
     assert json.loads(atlas_mcp.search("a"))["results"] == []
 
 
+def test_search_still_answers_when_one_manifest_is_corrupt(loaded, tmp_path):
+    """_blobs reads every manifest to build the search index; one hand-edited or truncated
+    file must not take every query down with it."""
+    (tmp_path / "repos" / "web.json").write_text("not json {")
+    results = json.loads(atlas_mcp.search("order.created"))["results"]
+    assert [r["repo"] for r in results] == ["orders"]
+
+
+def test_search_clamps_a_very_negative_limit(loaded):
+    """results[:limit] on a negative limit is a slice, not an error, and a limit past -len
+    silently returns nothing at all."""
+    results = json.loads(atlas_mcp.search("order.created", limit=-100))["results"]
+    assert len(results) >= 1
+
+
 def test_get_doc_returns_markdown(loaded):
     assert "the orders doc" in atlas_mcp.get_doc("orders")
 

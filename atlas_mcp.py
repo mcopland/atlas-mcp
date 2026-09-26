@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -48,9 +49,19 @@ class Store:
     def manifest(self, name: str) -> dict[str, Any]:
         if name not in self.manifests:
             path = ATLAS / "repos" / f"{name}.json"
-            self.manifests[name] = (
-                json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            )
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                    else:
+                        print(f"atlas: manifest is not an object: {path}", file=sys.stderr)
+                # search reads every manifest to build its index; one hand-edited or
+                # truncated file must not take every query down with it.
+                except (OSError, ValueError) as e:
+                    print(f"atlas: skipping unreadable manifest {path}: {e}", file=sys.stderr)
+            self.manifests[name] = data
         return self.manifests[name]
 
 
@@ -306,7 +317,7 @@ def search(query: str, limit: int = 10) -> str:
                 {"repo": n, "score": score, "summary": m.get("summary", ""), "matches": matches}
             )
     results.sort(key=lambda r: -r["score"])
-    return out({"results": results[:limit]})
+    return out({"results": results[: max(1, limit)]})
 
 
 @server.tool(annotations=READ_ONLY)
