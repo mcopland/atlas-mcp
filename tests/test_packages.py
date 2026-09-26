@@ -67,6 +67,27 @@ def test_extract_packages_records_relative_evidence(tmp_path):
     assert ev.replace("\\", "/") == "svc/go.mod"
 
 
+def test_extract_packages_skips_a_gitignored_manifest(make_repo):
+    """A file .gitignore hides from the model must not become a deterministic fact either:
+    the model never saw it, so a name it declares should not silently reach the graph."""
+    repo = make_repo(
+        "svc",
+        files={
+            ".gitignore": "ignored/package.json\n",
+            "ignored/package.json": json.dumps({"name": "should-not-appear"}),
+            "package.json": json.dumps({"name": "svc"}),
+        },
+    )
+    got = atlas.extract_packages(repo)
+    assert {p["name"] for p in got["publishes"]} == {"svc"}
+
+
+def test_extract_packages_reads_a_tracked_manifest_in_a_git_repo(make_repo):
+    repo = make_repo("svc", files={"package.json": json.dumps({"name": "svc"})})
+    got = atlas.extract_packages(repo)
+    assert {p["name"] for p in got["publishes"]} == {"svc"}
+
+
 POM = """<project xmlns="http://maven.apache.org/POM/4.0.0">
   <groupId>com.org</groupId>
   <artifactId>orders</artifactId>

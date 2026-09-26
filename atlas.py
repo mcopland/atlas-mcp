@@ -474,21 +474,18 @@ def save_repo_map(cfg, repos):
 # ---------- deterministic package facts ----------
 
 
-def walk(repo, filenames, max_depth=4):
-    root = repo.resolve()
-    for dirpath, dirnames, files in os.walk(repo):
-        depth = len(Path(dirpath).relative_to(repo).parts)
-        dirnames[:] = (
-            []
-            if depth >= max_depth
-            else [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+def walk(repo, filenames):
+    """The names extract_facts and extract_packages care about, filtered from the same
+    tracked-file list the bundle uses: a file .gitignore hides from the model must not become
+    a deterministic fact either. Falls back to the directory walk for a path git will not list,
+    same as the bundle."""
+    for rel in bundle_files(repo):
+        name = rel.rsplit("/", 1)[-1]
+        wanted = name in filenames or any(
+            fnmatch.fnmatch(name, pat) for pat in filenames if "*" in pat
         )
-        for f in files:
-            wanted = f in filenames or any(
-                fnmatch.fnmatch(f, pat) for pat in filenames if "*" in pat
-            )
-            if wanted and contained(root, Path(dirpath) / f):
-                yield Path(dirpath) / f
+        if wanted:
+            yield repo / rel
 
 
 def norm_pkg(eco, name):

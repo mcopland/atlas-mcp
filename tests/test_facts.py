@@ -327,6 +327,27 @@ def test_openapi_json_is_read_too(tmp_path):
     assert idents(tmp_path) == {"orders-api", "orders.example.net"}
 
 
+def test_extract_facts_skips_a_gitignored_openapi_file(make_repo):
+    """A file .gitignore hides from the model must not become a deterministic fact either:
+    the model never saw it, so a host it names should not silently reach the graph."""
+    repo = make_repo(
+        "svc",
+        files={
+            ".gitignore": "swagger.json\n",
+            "swagger.json": json.dumps({"servers": [{"url": "https://ignored.example.net"}]}),
+        },
+    )
+    assert exposes(repo) == set()
+
+
+def test_extract_facts_reads_a_tracked_openapi_file_in_a_git_repo(make_repo):
+    repo = make_repo(
+        "svc",
+        files={"swagger.json": json.dumps({"servers": [{"url": "https://tracked.example.net"}]})},
+    )
+    assert ("http", "tracked.example.net") in exposes(repo)
+
+
 # ---------- proto ----------
 
 
