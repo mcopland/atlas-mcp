@@ -345,6 +345,25 @@ def test_a_source_file_that_is_not_a_key_file_is_not_excerpted(make_repo):
     assert "### internal/store/db.go" not in bundle(repo)
 
 
+def test_tracked_files_is_not_truncated_at_bundle_max_files(make_repo, monkeypatch):
+    """The cap used to cut the candidate list itself, alphabetically, so a monorepo past it
+    could never have its later files excerpted or scanned at all. Bounding what gets read is
+    excerpt_blocks' and signal_sections' job now, not tracked_files'."""
+    monkeypatch.setattr(atlas, "BUNDLE_MAX_FILES", 2)
+    repo = make_repo("svc", files={f"filler{i}.txt": "x" for i in range(5)})
+    assert len(atlas.tracked_files(repo)) == 5
+
+
+def test_a_key_file_sorting_after_the_file_cap_still_reaches_the_excerpts(make_repo, monkeypatch):
+    monkeypatch.setattr(atlas, "BUNDLE_MAX_FILES", 2)
+    files = {f"aaa_filler{i}.txt": "x" for i in range(4)}
+    files["zzz/package.json"] = json.dumps({"name": "late-package-marker"})
+    repo = make_repo("svc", files=files)
+    text = bundle(repo)
+    assert "### zzz/package.json" in text
+    assert "late-package-marker" in text
+
+
 def test_an_excerpt_is_capped_per_file(make_repo, monkeypatch):
     repo = make_repo("svc", files={"main.go": "package main\n" + ("// filler\n" * 4000)})
     monkeypatch.setattr(atlas, "BUNDLE_FILE_BYTES", 500)

@@ -1227,8 +1227,12 @@ def tracked_files(repo):
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
         return None  # not a work tree: falling back to the walk is the documented behaviour
     # git() strips whitespace and NUL is not whitespace, so the trailing separator survives.
+    # Not capped at BUNDLE_MAX_FILES here: that would cut the candidate list itself,
+    # alphabetically, and a monorepo past the cap would lose its later files from the tree,
+    # the excerpts and the signal scan alike. excerpt_blocks and signal_sections bound the
+    # reads they actually do instead.
     rels = sorted(r for r in listing.split("\0") if r and bundle_path_ok(r, repo))
-    return rels[:BUNDLE_MAX_FILES] or None
+    return rels or None
 
 
 def bundle_files(repo):
@@ -1287,9 +1291,11 @@ def read_capped(path, cap):
     return text[:cap] + "\n... truncated\n" if len(text) > cap else text
 
 
-def excerpt_blocks(repo, paths):
+def excerpt_blocks(repo, paths, budget):
+    """Priority order is kept: the first file whose block does not fit `budget` ends the
+    section, rather than reading every remaining key file only to throw most of them away."""
     ranked = sorted((g, rel) for rel in paths if (g := key_file_group(rel)) is not None)
-    blocks = []
+    blocks, used = [], 0
     for _, rel in ranked:
         cap = (
             BUNDLE_README_BYTES
@@ -1297,8 +1303,14 @@ def excerpt_blocks(repo, paths):
             else BUNDLE_FILE_BYTES
         )
         body = read_capped(repo / rel, cap)
-        if body is not None:
-            blocks.append(f"### {rel}\n{body.rstrip()}\n\n")
+        if body is None:
+            continue
+        block = f"### {rel}\n{body.rstrip()}\n\n"
+        size = len(block.encode("utf-8"))
+        if used + size > budget:
+            break
+        blocks.append(block)
+        used += size
     return blocks
 
 
@@ -1316,12 +1328,16 @@ def signal_key(category, match):
 def signal_sections(repo, paths):
     """One line per distinct target, so a URL repeated in fifty call sites costs one slot."""
     found = {name: {} for name in SIGNAL_PATTERNS}
+    read = 0
     for rel in paths:
+        if read >= BUNDLE_MAX_FILES:
+            break  # a monorepo's tail is not worth reading past this: the tree already covers it
         if all(len(hits) >= BUNDLE_SIGNALS_PER_CATEGORY for hits in found.values()):
             break  # every category full: the rest can only be read, scanned and thrown away
         # Not Path.suffix: pathlib reports no suffix for a dotfile, which would skip `.env`.
         if "." + rel.rsplit(".", 1)[-1] not in SIGNAL_EXTS:
             continue
+        read += 1
         text = read_capped(repo / rel, BUNDLE_MAX_FILE_BYTES)
         if text is None:
             continue
@@ -1371,7 +1387,8 @@ def gather_bundle(repo, budget, only=None):
         tree.append(f"... and {hidden} more files\n")
     text = "## Tree\n" + fit(tree, budget * 10 // 100)
 
-    excerpts = fit(excerpt_blocks(repo, chosen), budget * 70 // 100 - len(text.encode("utf-8")))
+    excerpt_budget = budget * 70 // 100 - len(text.encode("utf-8"))
+    excerpts = "".join(excerpt_blocks(repo, chosen, excerpt_budget))
     if excerpts:
         text += "\n## Files\n" + excerpts
 
