@@ -403,6 +403,36 @@ def test_a_real_run_still_blocks_on_a_held_lock(make_repo, make_cfg, monkeypatch
     assert "another atlas run" in str(e.value)
 
 
+def test_build_blocks_on_a_held_lock(make_repo, make_cfg):
+    """build writes graph.json and docs.new with the same names a concurrent generate uses;
+    without the lock the two runs would race on both."""
+    make_repo("live")
+    cfg = make_cfg()
+    with atlas.atlas_lock(cfg["atlas_dir"]), pytest.raises(SystemExit) as e:
+        atlas.cmd_build(cfg, argparse.Namespace())
+    assert "another atlas run" in str(e.value)
+
+
+def test_prune_apply_blocks_on_a_held_lock(make_repo, make_cfg, make_manifest):
+    make_repo("live")
+    cfg = make_cfg()
+    make_manifest(cfg, "gone")
+    with atlas.atlas_lock(cfg["atlas_dir"]), pytest.raises(SystemExit) as e:
+        atlas.cmd_prune(cfg, argparse.Namespace(apply=True))
+    assert "another atlas run" in str(e.value)
+
+
+def test_prune_without_apply_does_not_block_on_a_held_lock(
+    make_repo, make_cfg, make_manifest, capsys
+):
+    make_repo("live")
+    cfg = make_cfg()
+    make_manifest(cfg, "gone")
+    with atlas.atlas_lock(cfg["atlas_dir"]):
+        atlas.cmd_prune(cfg, argparse.Namespace(apply=False))
+    assert "gone: orphan" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("arg", ["--trust-all-tools", "--trust-all-tools=true"])
 def test_load_config_rejects_trusting_every_tool(make_cfg, arg):
     with pytest.raises(SystemExit) as e:

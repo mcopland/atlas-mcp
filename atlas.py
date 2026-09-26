@@ -337,7 +337,9 @@ def write_json(path, data):
 
 @contextlib.contextmanager
 def atlas_lock(atlas_dir, force=False):
-    """One generate at a time: a full org run can outlast its own cron interval."""
+    """One writer at a time: generate, build, and prune --apply all touch graph.json, the
+    docs.new staging directory, or the manifests themselves, and a full org run can outlast
+    its own cron interval."""
     atlas_dir.mkdir(parents=True, exist_ok=True)
     path = atlas_dir / ".generate.lock"
     stamp = f"pid {os.getpid()} started {now().isoformat(timespec='seconds')}\n"
@@ -349,7 +351,7 @@ def atlas_lock(atlas_dir, force=False):
             fh.seek(0)
             holder = fh.read().strip() or "unknown holder"
             fh.close()
-            sys.exit(f"another atlas run holds {path} ({holder}); waiting for it to finish")
+            sys.exit(f"another atlas run holds {path} ({holder}); try again when it finishes")
         try:
             fh.seek(0)
             fh.truncate()
@@ -2218,7 +2220,10 @@ def cmd_generate(cfg, args):
 
 
 def cmd_build(cfg, _args):
-    build(cfg, known_repo_names(cfg))
+    # A concurrent generate rebuilds the graph and docs itself; racing it here would have both
+    # runs rmtree the same docs.new staging directory or write the same graph.json.tmp.
+    with atlas_lock(cfg["atlas_dir"]):
+        build(cfg, known_repo_names(cfg))
 
 
 def cmd_prune(cfg, args):
@@ -2229,22 +2234,26 @@ def cmd_prune(cfg, args):
         print("no orphan manifests")
         return
     dest = repos_dir / "_orphans"
-    for p in orphans:
-        if args.apply:
-            dest.mkdir(parents=True, exist_ok=True)
-            target = dest / p.name
-            if target.exists():  # keep the earlier snapshot; nothing is ever deleted
-                target = dest / f"{p.stem}.{now().strftime('%Y%m%dT%H%M%S')}.json"
-            p.replace(target)
-        print(f"  {p.stem}: {'moved aside' if args.apply else 'orphan'}")
-    print(
-        f"{len(orphans)} orphans "
-        + (
-            f"moved to {dest}"
-            if args.apply
-            else f"found; rerun with --apply to move them to {dest}"
+    # Only --apply writes: moving a manifest a concurrent generate is about to read or replace
+    # is the race worth locking against. Listing orphans is read-only and stays lock-free.
+    lock = atlas_lock(cfg["atlas_dir"]) if args.apply else contextlib.nullcontext()
+    with lock:
+        for p in orphans:
+            if args.apply:
+                dest.mkdir(parents=True, exist_ok=True)
+                target = dest / p.name
+                if target.exists():  # keep the earlier snapshot; nothing is ever deleted
+                    target = dest / f"{p.stem}.{now().strftime('%Y%m%dT%H%M%S')}.json"
+                p.replace(target)
+            print(f"  {p.stem}: {'moved aside' if args.apply else 'orphan'}")
+        print(
+            f"{len(orphans)} orphans "
+            + (
+                f"moved to {dest}"
+                if args.apply
+                else f"found; rerun with --apply to move them to {dest}"
+            )
         )
-    )
 
 
 def cmd_unresolved(cfg, args):
