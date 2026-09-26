@@ -1661,8 +1661,17 @@ def process_repo(cfg, name, repo, args):
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             print(f"warn: {name}: pull failed: {e}", file=sys.stderr)
     head = git(repo, "rev-parse", "HEAD")
-    old = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
-    meta = (old or {}).get("_meta", {})
+    old = {}
+    if out.exists():
+        try:
+            candidate = json.loads(out.read_text(encoding="utf-8"))
+            check_meta(candidate)
+            old = candidate
+        # A hand-edited or truncated manifest is expected, not a reason to fail this repo on
+        # every run: treat it as though the repo were new, which means a full regen.
+        except (OSError, ValueError) as e:
+            print(f"warn: {name}: ignoring unreadable manifest {out}: {e}", file=sys.stderr)
+    meta = old.get("_meta", {})
     mode, changed = "full", []
     mapper = "explore" if name in set(cfg["explore_repos"]) else cfg["mapper_mode"]
     stamp = prompt_hash(mapper)

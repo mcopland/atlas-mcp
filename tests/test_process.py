@@ -606,6 +606,40 @@ def test_a_restamp_drops_an_old_item_with_directory_evidence(
     assert written["exposes"] == []
 
 
+@pytest.mark.parametrize(
+    "bad_text",
+    ["not json {", "[]", "{}", '{"_meta": {}}'],
+    ids=["invalid-json", "json-list", "no-meta", "incomplete-meta"],
+)
+def test_a_corrupt_previous_manifest_is_treated_as_a_new_repo(
+    make_repo, make_cfg, gen_args, stub_kiro, bad_text, capsys
+):
+    """A hand-edited or truncated manifest must not fail the repo on every run: README and
+    check_meta both treat a malformed manifest as expected, so process_repo should recover by
+    running a full regen rather than raising."""
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    out = cfg["atlas_dir"] / "repos" / "svc.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(bad_text)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "full"
+    assert "ignoring unreadable manifest" in capsys.readouterr().err
+
+
+def test_a_corrupt_previous_manifest_still_regenerates_with_full_flag(
+    make_repo, make_cfg, gen_args, stub_kiro
+):
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    out = cfg["atlas_dir"] / "repos" / "svc.json"
+    out.parent.mkdir(parents=True)
+    out.write_text("not json {")
+    gen_args.full = True
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "full"
+
+
 def test_a_deterministic_identifier_that_is_generic_never_reaches_the_manifest(
     make_repo, make_cfg, make_manifest, gen_args, stub_kiro
 ):
