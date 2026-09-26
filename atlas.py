@@ -1464,7 +1464,13 @@ def prompt_hash(mode):
     return h.hexdigest()[:12]
 
 
+PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
+
+
 def build_prompt(cfg, template, **values):
+    """Substituted in one pass over the template text, not repeated whole-string replaces: a
+    repo file quoted into BUNDLE or MANIFEST can itself contain a literal `{{SCHEMA}}`, and a
+    second pass would expand it as though the template had asked for it."""
     text = (KIT / "prompts" / template).read_text(encoding="utf-8")
     values.setdefault("SCHEMA", (KIT / "prompts" / "schema.json").read_text(encoding="utf-8"))
     values.setdefault(
@@ -1473,9 +1479,7 @@ def build_prompt(cfg, template, **values):
         if cfg["domains"]
         else "a short lowercase name of your choice",
     )
-    for k, v in values.items():
-        text = text.replace("{{" + k + "}}", v)
-    return text
+    return PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), text)
 
 
 def jsonl_text(text):

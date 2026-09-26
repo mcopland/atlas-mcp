@@ -196,6 +196,29 @@ def test_prompt_hash_rejects_an_unknown_mode():
         atlas.prompt_hash("telepathy")
 
 
+def test_build_prompt_does_not_expand_a_placeholder_hiding_in_a_value(make_cfg):
+    """Substitution runs in one pass over the template text: a repo file that happens to
+    contain a literal {{SCHEMA}} or {{MANIFEST}} must not get expanded just because it was
+    dropped into the BUNDLE or MANIFEST value."""
+    cfg = make_cfg()
+    text = atlas.build_prompt(cfg, "bundle_full.md", BUNDLE="a repo file says {{SCHEMA}} here")
+    assert "a repo file says {{SCHEMA}} here" in text
+
+
+def test_build_prompt_substitutes_every_known_placeholder(make_cfg):
+    cfg = make_cfg()
+    text = atlas.build_prompt(
+        cfg,
+        "bundle_update.md",
+        BUNDLE="B",
+        OLD_COMMIT="a",
+        NEW_COMMIT="b",
+        CHANGED_FILES="f.go",
+        MANIFEST="{}",
+    )
+    assert "{{" not in text
+
+
 BUDGET = 64 * 1024
 
 
