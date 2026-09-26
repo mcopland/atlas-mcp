@@ -583,6 +583,29 @@ def test_a_restamp_picks_up_a_codeowners_change_without_a_model_call(
     assert written["owners"] == ["@org/new-team"]
 
 
+def test_a_restamp_drops_an_old_item_with_directory_evidence(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """The evidence gate used to accept a directory. A stale facts_version forces a restamp
+    for every entry made under the old, looser gate, which purges the bad item for free."""
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    head = atlas.git(repo, "rev-parse", "HEAD")
+    seed(
+        cfg,
+        make_manifest,
+        repo,
+        "svc",
+        head,
+        facts_version=3,
+        exposes=[{"kind": "http", "key": "a", "evidence": "."}],
+    )
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    written = json.loads((cfg["atlas_dir"] / "repos" / "svc.json").read_text())
+    assert written["exposes"] == []
+
+
 def test_a_deterministic_identifier_that_is_generic_never_reaches_the_manifest(
     make_repo, make_cfg, make_manifest, gen_args, stub_kiro
 ):

@@ -809,7 +809,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 3
+FACTS_VERSION = 4
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -1587,7 +1587,7 @@ def evidence_ok(repo, evidence):
     if not m:
         return False
     target = contained(repo, repo / m.group(1).removeprefix("./"))
-    return target is not None and target.exists()
+    return target is not None and target.is_file()
 
 
 def clean_manifest(m, repo, cfg):

@@ -21,6 +21,15 @@ def test_evidence_ok_rejects_missing_and_escaping_paths(tmp_path):
     assert not atlas.evidence_ok(tmp_path, None)
 
 
+def test_evidence_ok_rejects_a_directory(tmp_path):
+    """A directory always exists once the repo does, so citing one would let any claim
+    through the gate; only a real file counts as evidence."""
+    (tmp_path / "src").mkdir()
+    assert not atlas.evidence_ok(tmp_path, "src")
+    assert not atlas.evidence_ok(tmp_path, ".")
+    assert not atlas.evidence_ok(tmp_path, "./")
+
+
 @pytest.mark.skipif(os.name != "posix", reason="symlink creation needs privileges off POSIX")
 def test_evidence_ok_rejects_symlink_escaping_the_repo(tmp_path):
     repo = tmp_path / "repo"
