@@ -474,12 +474,16 @@ def save_repo_map(cfg, repos):
 # ---------- deterministic package facts ----------
 
 
-def walk(repo, filenames):
+def walk(repo, filenames, files=None):
     """The names extract_facts and extract_packages care about, filtered from the same
     tracked-file list the bundle uses: a file .gitignore hides from the model must not become
     a deterministic fact either. Falls back to the directory walk for a path git will not list,
-    same as the bundle."""
-    for rel in bundle_files(repo):
+    same as the bundle.
+
+    `files`, when given, is that listing already gathered by the caller: process_repo calls
+    gather_bundle, extract_facts and extract_packages for the same repo in the same run, and
+    each used to list it (git ls-files, then every path re-validated) on its own."""
+    for rel in files if files is not None else bundle_files(repo):
         name = rel.rsplit("/", 1)[-1]
         wanted = name in filenames or any(
             fnmatch.fnmatch(name, pat) for pat in filenames if "*" in pat
@@ -510,7 +514,7 @@ def coord(group, artifact):
     return f"{group}:{artifact}".strip(":")
 
 
-def extract_packages(repo):
+def extract_packages(repo, files=None):
     publishes, depends = {}, {}
 
     def pub(eco, name, f):
@@ -532,7 +536,7 @@ def extract_packages(repo):
         "Cargo.toml",
         "*.csproj",
     }
-    for f in walk(repo, wanted):
+    for f in walk(repo, wanted, files):
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
             if f.name == "package.json":
@@ -862,7 +866,7 @@ def codeowners_rule(text):
     return best or []
 
 
-def extract_facts(repo, stoplist=frozenset()):
+def extract_facts(repo, stoplist=frozenset(), files=None):
     """Names, endpoints, owned stores and owners read straight out of the repo's own deploy and
     API manifests. The model would otherwise have to infer all of this from a bundle excerpt, so
     doing it here costs no credits and puts the resulting edges on the `exact` tier."""
@@ -936,7 +940,7 @@ def extract_facts(repo, stoplist=frozenset()):
     parsed = 0
     # Sorted, not os.walk order: which manifests fit under the cap is a property of the
     # repo, not of how the filesystem happens to hand back a directory.
-    for f in sorted(walk(repo, {"*.yaml", "*.yml"})):
+    for f in sorted(walk(repo, {"*.yaml", "*.yml"}, files)):
         rel = f.relative_to(repo).as_posix()
         if "templates/" in rel:  # a Helm template is a Go template, not yaml
             continue
@@ -982,7 +986,7 @@ def extract_facts(repo, stoplist=frozenset()):
                     if isinstance(rule, dict):
                         expose("http", rule.get("host"), "ingress host", rel)
 
-    for f in sorted(walk(repo, set(OPENAPI_JSON))):
+    for f in sorted(walk(repo, set(OPENAPI_JSON), files)):
         text = facts_text(f)
         if text is None:
             continue
@@ -994,7 +998,7 @@ def extract_facts(repo, stoplist=frozenset()):
         if isinstance(doc, dict):
             server_hosts(doc, f.relative_to(repo).as_posix())
 
-    for f in sorted(walk(repo, {"*.proto"})):
+    for f in sorted(walk(repo, {"*.proto"}, files)):
         text = facts_text(f)
         if text is None:
             continue
@@ -1005,7 +1009,7 @@ def extract_facts(repo, stoplist=frozenset()):
             elif package and (m := PROTO_SERVICE.match(line)):
                 expose("grpc", f"{package}.{m.group(1)}", "grpc service", f"{rel}:{n}")
 
-    for f in sorted(walk(repo, {"*.tf"})):
+    for f in sorted(walk(repo, {"*.tf"}, files)):
         text = facts_text(f)
         if text is None:
             continue
@@ -1211,7 +1215,7 @@ ENV_INTERESTING = (
 )
 
 
-def bundle_path_ok(rel, repo):
+def bundle_path_ok(rel, repo, resolved_root=None):
     """The limits the walk enforces by not descending, applied to a path it did not produce, so
     both collectors agree on what a bundle may contain. The is_file check also drops submodules,
     which git lists as paths but which nothing here can read."""
@@ -1220,7 +1224,7 @@ def bundle_path_ok(rel, repo):
         return False
     if any(d in SKIP_DIRS or (d.startswith(".") and d not in BUNDLE_DOT_DIRS) for d in parts[:-1]):
         return False
-    return inside_repo(repo, rel) is not None
+    return inside_repo(repo, rel, resolved_root) is not None
 
 
 def tracked_files(repo):
@@ -1241,7 +1245,8 @@ def tracked_files(repo):
     # alphabetically, and a monorepo past the cap would lose its later files from the tree,
     # the excerpts and the signal scan alike. excerpt_blocks and signal_sections bound the
     # reads they actually do instead.
-    rels = sorted(r for r in listing.split("\0") if r and bundle_path_ok(r, repo))
+    resolved_root = repo.resolve()  # fixed for this whole listing; resolving it per file is waste
+    rels = sorted(r for r in listing.split("\0") if r and bundle_path_ok(r, repo, resolved_root))
     return rels or None
 
 
@@ -1254,6 +1259,7 @@ def walked_files(repo):
     """The fallback for a path git will not list. `.github` is the one dot-directory worth
     descending into, because CODEOWNERS often lives there."""
     out = []
+    resolved_root = repo.resolve()
     for dirpath, dirnames, files in os.walk(repo):
         rel_dir = Path(dirpath).relative_to(repo)
         depth = len(rel_dir.parts)
@@ -1267,7 +1273,7 @@ def walked_files(repo):
             )
         )
         for f in sorted(files):
-            if inside_repo(repo, rel_dir / f) is None:
+            if inside_repo(repo, rel_dir / f, resolved_root) is None:
                 continue
             out.append((rel_dir / f).as_posix())
             if len(out) >= BUNDLE_MAX_FILES:
@@ -1384,11 +1390,15 @@ def fit(blocks, budget):
     return "".join(out)
 
 
-def gather_bundle(repo, budget, only=None):
+def gather_bundle(repo, budget, only=None, files=None):
     """A deterministic, redacted, budgeted picture of one repo: tree, key files, and the lines
     that name other systems. Replaces letting the model explore the repo itself."""
-    files = bundle_files(repo)
-    chosen = files if only is None else [f for f in files if f in {str(p) for p in only}]
+    files = bundle_files(repo) if files is None else files
+    # Built once, not once per file: `only` set inline in the comprehension's condition would
+    # otherwise be rebuilt from scratch on every one of `files`, an update-mode-only cost that
+    # scales with files x changed rather than either alone.
+    only_set = None if only is None else {str(p) for p in only}
+    chosen = files if only_set is None else [f for f in files if f in only_set]
 
     shallow = [f for f in files if len(f.split("/")) <= BUNDLE_TREE_DEPTH]
     tree = [f"- {f}\n" for f in shallow[:BUNDLE_TREE_MAX]]
@@ -1454,14 +1464,15 @@ def domain_for(cfg, name):
     return ""
 
 
-def mapper_prompt(cfg, repo, mapper, template, values, only=None, cap=None):
+def mapper_prompt(cfg, repo, mapper, template, values, only=None, cap=None, files=None):
     """In bundle mode the bundle gets whatever the rendered template leaves of the prompt cap."""
     if mapper != "bundle":
         return build_prompt(cfg, template, **values)
     shell = build_prompt(cfg, template, BUNDLE="", **values)
     cap = cfg["bundle_budget_bytes"] if cap is None else cap
     budget = cap - len(shell.encode("utf-8")) - BUNDLE_MARGIN_BYTES
-    return build_prompt(cfg, template, BUNDLE=gather_bundle(repo, budget, only=only), **values)
+    bundle = gather_bundle(repo, budget, only=only, files=files)
+    return build_prompt(cfg, template, BUNDLE=bundle, **values)
 
 
 def prompt_hash(mode):
@@ -1599,17 +1610,22 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
     return parse_output(ANSI.sub("", r.stdout or ""))
 
 
-def contained(root, path):
+def contained(root, path, resolved_root=None):
     """`path` with every symlink resolved, or None when that lands outside the resolved `root`.
     Repo content is untrusted: a committed `README.md -> ~/.aws/credentials` must not be read
-    into a prompt, and a repo reached through a symlinked parent must still contain its files."""
-    root, target = root.resolve(), path.resolve()
+    into a prompt, and a repo reached through a symlinked parent must still contain its files.
+
+    `resolved_root`, when given, is `root.resolve()` already computed by the caller: root is
+    fixed for an entire file listing, so resolving it again for every file in that listing is
+    wasted work."""
+    root = resolved_root if resolved_root is not None else root.resolve()
+    target = path.resolve()
     return target if target == root or root in target.parents else None
 
 
-def inside_repo(repo, rel):
+def inside_repo(repo, rel, resolved_root=None):
     """The regular file `rel` names, if it is one and it stays inside the repo."""
-    target = contained(repo, repo / rel)
+    target = contained(repo, repo / rel, resolved_root)
     return target if target is not None and target.is_file() else None
 
 
@@ -1721,6 +1737,10 @@ def process_repo(cfg, name, repo, args):
     # Read after the skip and dry-run branches, so neither pays for a subprocess it cannot use.
     remote_url = repo_remote_url(repo)
     last_commit_at = repo_last_commit_at(repo)
+    # Listed once and handed to the bundle, the facts extractors and the package extractor,
+    # which otherwise each list the repo (git ls-files, then every path re-validated) on their
+    # own: up to six listings of the same tree for one repo on every run past this point.
+    files = bundle_files(repo)
     prompt_bytes, attempts = 0, 0
     if mode == "restamp":
         manifest = {k: v for k, v in old.items() if k != "_meta"}
@@ -1743,6 +1763,7 @@ def process_repo(cfg, name, repo, args):
                 },
                 only=set(changed),
                 cap=MAX_UPDATE_PROMPT_BYTES,
+                files=files,
             )
             if len(prompt.encode("utf-8")) > MAX_UPDATE_PROMPT_BYTES:
                 print(
@@ -1751,7 +1772,7 @@ def process_repo(cfg, name, repo, args):
                 )
                 mode, changed, prompt = "full", [], None
         if prompt is None:
-            prompt = mapper_prompt(cfg, repo, mapper, full_template, {})
+            prompt = mapper_prompt(cfg, repo, mapper, full_template, {}, files=files)
         prompt_bytes = len(prompt.encode("utf-8"))
         log = cfg["atlas_dir"] / "logs" / f"{name}.log"
         attempts = 1
@@ -1765,14 +1786,14 @@ def process_repo(cfg, name, repo, args):
     redact_manifest(manifest)
     # Merged before the gate, so a parser that emits a path the repo does not have shows up in
     # dropped_without_evidence instead of reaching the graph unchallenged.
-    facts = extract_facts(repo, cfg["generic_identifiers"])
+    facts = extract_facts(repo, cfg["generic_identifiers"], files=files)
     merge_facts(manifest, facts, meta)
     dropped, rejected = clean_manifest(manifest, repo, cfg)
     manifest["name"] = name
     forced = domain_for(cfg, name)
     if forced:
         manifest["domain"] = forced
-    manifest["packages"] = extract_packages(repo)
+    manifest["packages"] = extract_packages(repo, files=files)
     manifest["_meta"] = {
         "repo_path": str(repo),
         "remote_url": remote_url,

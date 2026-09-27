@@ -127,6 +127,35 @@ def test_oversized_update_prompt_falls_back_to_full(
     assert "Current entry" not in stub_kiro[0]
 
 
+def test_full_regeneration_lists_the_repos_tracked_files_once(
+    make_repo, make_cfg, gen_args, stub_kiro, monkeypatch
+):
+    """gather_bundle, extract_facts and extract_packages each used to list the repo's tracked
+    files themselves (git ls-files, then every path re-validated), so one process_repo call ran
+    the listing six times over. It must run once and be shared."""
+    repo = make_repo(
+        "svc",
+        files={
+            "main.go": "package main",
+            "k8s/service.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: svc\n",
+            "package.json": '{"name": "svc"}',
+        },
+    )
+    cfg = make_cfg()
+    orig_git = atlas.git
+    ls_files_calls = []
+
+    def counting_git(target, *args, **kwargs):
+        if args[:1] == ("ls-files",):
+            ls_files_calls.append(args)
+        return orig_git(target, *args, **kwargs)
+
+    monkeypatch.setattr(atlas, "git", counting_git)
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "full"
+    assert len(ls_files_calls) == 1
+
+
 def test_dry_run_never_calls_kiro(make_repo, make_cfg, gen_args, stub_kiro):
     repo = make_repo("svc")
     cfg = make_cfg()

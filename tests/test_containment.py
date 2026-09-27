@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,25 @@ def test_gradle_settings_symlinked_out_of_the_repo_are_not_read(make_repo, outsi
         repo, "settings.gradle", outside("settings.gradle", "rootProject.name = 'stolen'\n")
     )
     assert atlas.extract_packages(repo)["publishes"] == []
+
+
+def test_tracked_files_resolves_the_repo_root_only_once(make_repo, monkeypatch):
+    """contained() used to re-resolve the repo root for every file it validated, though the
+    root is fixed for the whole listing. One tracked_files() call over N files must resolve
+    the root once, not N times."""
+    repo = make_repo("svc", files={f"f{i}.txt": "x" for i in range(20)})
+    orig_resolve = Path.resolve
+    root_resolves = []
+
+    def counting_resolve(self, *a, **k):
+        if self == repo:
+            root_resolves.append(self)
+        return orig_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    files = atlas.tracked_files(repo)
+    assert len(files) == 20
+    assert len(root_resolves) == 1
 
 
 def test_evidence_ok_accepts_a_repo_reached_through_a_symlinked_parent(tmp_path):
