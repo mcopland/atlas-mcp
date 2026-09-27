@@ -11,9 +11,15 @@ requires-python = ">=3.11"
 package = false
 
 [dependency-groups]
-dev = ["pytest>=8", "mcp>=1"]
+dev = ["pytest>=8", "mcp>=1", "ruff>=0.16"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+
+[tool.ruff]
+# Pinned so CI and anyone without a personal ruff config get the same result `uv run --group
+# dev ruff` gives here: ruff's own default line-length is 88, and this repo is wrapped at 100.
+# target-version is left to ruff's inference from requires-python above.
+line-length = 100

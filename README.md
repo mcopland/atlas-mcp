@@ -131,10 +131,12 @@ Schedule it, for example every 6 hours with cron. Spell out the path to `uv` fro
 ## Development
 
 ```bash
-uv run --group dev pytest
+uv run --locked --group dev pytest
+uv run --locked --group dev ruff check .
+uv run --locked --group dev ruff format --check .
 ```
 
-`pyproject.toml` holds the test configuration and the dev dependency group. It deliberately sets `package = false`: this is two standalone scripts, not an installable package, so nothing is ever built or installed. Runtime dependencies live in each script's `# /// script` header instead, because `uv run --script` ignores `pyproject.toml` entirely.
+`pyproject.toml` holds the test configuration, the `[tool.ruff]` pin (just `line-length`; target-version is inferred from `requires-python`), and the dev dependency group. It deliberately sets `package = false`: this is two standalone scripts, not an installable package, so nothing is ever built or installed. Runtime dependencies live in each script's `# /// script` header instead, because `uv run --script` ignores `pyproject.toml` entirely. CI runs all three commands above plus `uv lock --script atlas_mcp.py --check`, which fails if that script's own pin (see below) and its lockfile have drifted apart.
 
 `uv run --group dev python bench/loadtest.py` runs a synthetic-org load test (extraction, `generate`, `build()`, and the MCP tools) to check performance at scale; it is not part of the test suite and does not run in CI.
 

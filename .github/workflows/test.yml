@@ -9,7 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
-      - run: uv run --group dev pytest
+      - run: uv run --locked --group dev ruff check .
+      - run: uv run --locked --group dev ruff format --check .
+      # atlas_mcp.py's own PEP 723 header is locked separately (atlas_mcp.py.lock), since Kiro
+      # launches it with `uv run --locked --script`: a pin edited there without relocking would
+      # otherwise only surface as a broken MCP server at Kiro startup.
+      - run: uv lock --script atlas_mcp.py --check
+      - run: uv run --locked --group dev pytest
