@@ -159,6 +159,96 @@ def test_maven_property_placeholders_are_not_treated_as_packages(tmp_path):
     assert atlas.extract_packages(tmp_path)["depends_on"] == []
 
 
+def test_extract_packages_reads_npm_optional_dependencies(tmp_path):
+    write(
+        tmp_path,
+        {"package.json": json.dumps({"name": "svc", "optionalDependencies": {"fsevents": "^2"}})},
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert ("npm", "fsevents") in {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+
+
+def test_extract_packages_reads_pyproject_optional_dependencies(tmp_path):
+    write(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                '[project]\nname = "svc"\n\n[project.optional-dependencies]\ntest = ["pytest>=8"]\n'
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert ("pypi", "pytest") in {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+
+
+def test_extract_packages_reads_pep735_dependency_groups(tmp_path):
+    write(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                '[project]\nname = "svc"\n\n'
+                "[dependency-groups]\n"
+                'dev = ["ruff>=0.16", { include-group = "test" }]\n'
+                'test = ["pytest>=8"]\n'
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    dep = {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+    assert ("pypi", "ruff") in dep
+    assert ("pypi", "pytest") in dep
+
+
+def test_extract_packages_reads_poetry_group_dependencies(tmp_path):
+    write(
+        tmp_path,
+        {
+            "pyproject.toml": (
+                '[tool.poetry]\nname = "svc"\n\n'
+                '[tool.poetry.group.dev.dependencies]\npytest = "^8"\n'
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert ("pypi", "pytest") in {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+
+
+def test_extract_packages_reads_a_gradle_version_catalog(tmp_path):
+    write(
+        tmp_path,
+        {
+            "gradle/libs.versions.toml": (
+                "[versions]\n"
+                'guava = "32.1"\n\n'
+                "[libraries]\n"
+                'guava = { module = "com.google.guava:guava", version.ref = "guava" }\n'
+                'junit-jupiter = { group = "org.junit.jupiter", name = "junit-jupiter", version = "5.10" }\n'
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    dep = {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+    assert ("maven", "com.google.guava:guava") in dep
+    assert ("maven", "org.junit.jupiter:junit-jupiter") in dep
+
+
+DIRECTORY_PACKAGES_PROPS = """<Project>
+  <ItemGroup>
+    <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageVersion Include="Serilog" Version="3.1.1" />
+  </ItemGroup>
+</Project>
+"""
+
+
+def test_extract_packages_reads_dotnet_central_package_versions(tmp_path):
+    write(tmp_path, {"Directory.Packages.props": DIRECTORY_PACKAGES_PROPS})
+    got = atlas.extract_packages(tmp_path)
+    dep = {(d["ecosystem"], d["name"]) for d in got["depends_on"]}
+    assert ("nuget", "newtonsoft.json") in dep
+    assert ("nuget", "serilog") in dep
+
+
 def test_maven_child_module_inherits_the_parent_group(tmp_path):
     write(
         tmp_path,

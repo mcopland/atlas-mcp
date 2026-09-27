@@ -65,6 +65,7 @@ FAMILY = {
     "topic": "msg",
     "queue": "msg",
     "event": "msg",
+    "stream": "msg",
     "package": "pkg",
     "database": "db",
 }
@@ -534,8 +535,10 @@ def extract_packages(repo, files=None):
         "pom.xml",
         "build.gradle",
         "build.gradle.kts",
+        "libs.versions.toml",
         "Cargo.toml",
         "*.csproj",
+        "Directory.Packages.props",
     }
     for f in walk(repo, wanted, files):
         try:
@@ -543,7 +546,13 @@ def extract_packages(repo, files=None):
             if f.name == "package.json":
                 data = json.loads(text)
                 pub("npm", data.get("name"), f)
-                for section in ("dependencies", "devDependencies", "peerDependencies"):
+                sections = (
+                    "dependencies",
+                    "devDependencies",
+                    "peerDependencies",
+                    "optionalDependencies",
+                )
+                for section in sections:
                     for n in data.get(section) or {}:
                         dep("npm", n, f)
             elif f.name == "go.mod":
@@ -562,11 +571,28 @@ def extract_packages(repo, files=None):
                 project = data.get("project") or {}
                 poetry = (data.get("tool") or {}).get("poetry") or {}
                 pub("pypi", project.get("name") or poetry.get("name"), f)
-                for spec in project.get("dependencies") or []:
+
+                def pypi_spec(spec, f=f):
                     m = re.match(r"[A-Za-z0-9_.\-]+", spec)
                     dep("pypi", m and m.group(0), f)
+
+                for spec in project.get("dependencies") or []:
+                    pypi_spec(spec)
+                for extra_deps in (project.get("optional-dependencies") or {}).values():
+                    for spec in extra_deps or []:
+                        pypi_spec(spec)
+                # PEP 735: a group's own entries are strings; an {include-group: ...} reference
+                # to another group is a dict and names no package of its own, so it is skipped
+                # here and picked up when that other group is iterated in its own right.
+                for group_deps in (data.get("dependency-groups") or {}).values():
+                    for entry in group_deps or []:
+                        if isinstance(entry, str):
+                            pypi_spec(entry)
                 for n in poetry.get("dependencies") or {}:
                     if n.lower() != "python":
+                        dep("pypi", n, f)
+                for group in (poetry.get("group") or {}).values():
+                    for n in (group or {}).get("dependencies") or {}:
                         dep("pypi", n, f)
             elif f.name.startswith("requirements"):
                 for line in text.splitlines():
@@ -603,6 +629,23 @@ def extract_packages(repo, files=None):
                         break
                 if group and root_name:
                     pub("maven", coord(group.group(1), root_name), f)
+            elif f.name == "libs.versions.toml":
+                # A Gradle version catalog. Its libraries are read directly rather than by
+                # resolving `libs.foo.bar` accessors back out of build.gradle: the catalog
+                # already names every dependency it declares, accessor or not.
+                data = tomllib.loads(text)
+                for lib in (data.get("libraries") or {}).values():
+                    if not isinstance(lib, dict):
+                        continue
+                    module = lib.get("module")
+                    if isinstance(module, str):
+                        group_artifact = module.split(":", 1)
+                    else:
+                        group_artifact = [lib.get("group"), lib.get("name")]
+                    if len(group_artifact) == 2 and all(
+                        isinstance(part, str) for part in group_artifact
+                    ):
+                        dep("maven", coord(*group_artifact), f)
             elif f.name == "Cargo.toml":
                 data = tomllib.loads(text)
                 name = (data.get("package") or {}).get("name")
@@ -622,6 +665,15 @@ def extract_packages(repo, files=None):
                 pub("nuget", ident or f.stem, f)
                 for node in root.iter():
                     if local(node) == "PackageReference":
+                        name = node.get("Include") or node.get("Update") or ""
+                        if "$(" not in name:
+                            dep("nuget", name, f)
+            elif f.name == "Directory.Packages.props":
+                # Central package management: version pins live here instead of in each
+                # .csproj's PackageReference, but the dependency itself is the same fact.
+                root = ET.fromstring(text)
+                for node in root.iter():
+                    if local(node) == "PackageVersion":
                         name = node.get("Include") or node.get("Update") or ""
                         if "$(" not in name:
                             dep("nuget", name, f)
@@ -824,7 +876,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 4
+FACTS_VERSION = 5
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -836,6 +888,12 @@ TF_RESOURCES = {  # resource type -> (attribute holding the real name, our kind,
     "aws_sqs_queue": ("name", "queue", False),
     "aws_s3_bucket": ("bucket", "s3", True),
     "aws_dynamodb_table": ("name", "dynamodb", True),
+    "aws_sns_topic": ("name", "topic", False),
+    "aws_kinesis_stream": ("name", "stream", False),
+    "google_pubsub_topic": ("name", "topic", False),
+    "google_storage_bucket": ("name", "gcs", True),
+    "azurerm_servicebus_queue": ("name", "queue", False),
+    "azurerm_servicebus_topic": ("name", "topic", False),
 }
 
 

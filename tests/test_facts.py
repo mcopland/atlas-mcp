@@ -401,6 +401,47 @@ def test_terraform_yields_owned_stores_and_queues_but_skips_interpolated_names(t
     }
 
 
+TF_MORE_RESOURCES = """resource "aws_sns_topic" "orders" {
+  name = "orders-notifications"
+}
+
+resource "aws_kinesis_stream" "clicks" {
+  name = "click-events"
+}
+
+resource "google_pubsub_topic" "orders" {
+  name = "orders-pubsub"
+}
+
+resource "google_storage_bucket" "assets" {
+  name = "org-assets"
+}
+
+resource "azurerm_servicebus_queue" "orders" {
+  name = "orders-queue"
+}
+
+resource "azurerm_servicebus_topic" "orders" {
+  name = "orders-topic"
+}
+"""
+
+
+def test_terraform_covers_sns_kinesis_pubsub_gcs_and_service_bus(tmp_path):
+    write(tmp_path, {"main.tf": TF_MORE_RESOURCES})
+    got = atlas.extract_facts(tmp_path)
+    assert {(e["kind"], e["key"]) for e in got["exposes"]} == {
+        ("topic", "orders-notifications"),
+        ("stream", "click-events"),
+        ("topic", "orders-pubsub"),
+        ("queue", "orders-queue"),
+        ("topic", "orders-topic"),
+    }
+    assert {(d["kind"], d["name"], d["access"]) for d in got["datastores"]} == {
+        ("gcs", "org-assets", "owner"),
+    }
+
+
 # ---------- shared rules ----------
 
 
