@@ -5,6 +5,7 @@
 # ///
 """Atlas MCP server (stdio). Reads ATLAS_DIR/graph.json and repos/*.json; reloads when graph.json changes."""
 
+import concurrent.futures as cf
 import json
 import os
 import re
@@ -320,6 +321,38 @@ def search(query: str, limit: int = 10) -> str:
     return out({"results": results[: max(1, limit)]})
 
 
+def _freshness_row(name, r, want_behind):
+    row = {"repo": name, "atlas_commit": r["commit"][:12], "generated_at": r["generated_at"]}
+    try:
+        head = subprocess.run(
+            ["git", "-C", r["repo_path"], "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+        if not head:
+            row["status"] = "missing"
+        elif head == r["commit"]:
+            row["status"] = "fresh"
+        else:
+            row.update(status="stale", head=head[:12])
+            if want_behind:  # one repo asked about: a second call per repo is affordable
+                behind = subprocess.run(
+                    ["git", "-C", r["repo_path"], "rev-list", "--count", f"{r['commit']}..HEAD"],
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                ).stdout.strip()
+                row["commits_behind"] = int(behind) if behind.isdigit() else None
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        row["status"] = f"error: {e}"
+    return row
+
+
 @server.tool(annotations=READ_ONLY)
 def freshness(name: str = "") -> str:
     """Compare the commit each atlas entry was generated from with the repo's current local HEAD.
@@ -333,45 +366,10 @@ def freshness(name: str = "") -> str:
         names = [repo]
     else:
         names = sorted(g["repos"])
-    rows = []
-    for n in names:
-        r = g["repos"][n]
-        row = {"repo": n, "atlas_commit": r["commit"][:12], "generated_at": r["generated_at"]}
-        try:
-            head = subprocess.run(
-                ["git", "-C", r["repo_path"], "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                timeout=5,
-                check=False,
-            ).stdout.strip()
-            if not head:
-                row["status"] = "missing"
-            elif head == r["commit"]:
-                row["status"] = "fresh"
-            else:
-                row.update(status="stale", head=head[:12])
-                if name:  # one repo asked about: a second call per repo is affordable
-                    behind = subprocess.run(
-                        [
-                            "git",
-                            "-C",
-                            r["repo_path"],
-                            "rev-list",
-                            "--count",
-                            f"{r['commit']}..HEAD",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        stdin=subprocess.DEVNULL,
-                        timeout=5,
-                        check=False,
-                    ).stdout.strip()
-                    row["commits_behind"] = int(behind) if behind.isdigit() else None
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            row["status"] = f"error: {e}"
-        rows.append(row)
+    # Each row is one `git rev-parse` subprocess; running them concurrently is what makes
+    # checking every repo in the org affordable instead of one process launch after another.
+    with cf.ThreadPoolExecutor(max_workers=max(1, min(16, len(names)))) as pool:
+        rows = list(pool.map(lambda n: _freshness_row(n, g["repos"][n], bool(name)), names))
     stale = sum(1 for r in rows if r["status"] != "fresh")
     return out(
         {
