@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -482,4 +483,12 @@ def test_missing_graph_is_reported(atlas_env, tmp_path, monkeypatch):
     monkeypatch.setattr(atlas_mcp, "ATLAS", tmp_path / "empty")
     monkeypatch.setattr(atlas_mcp, "store", atlas_mcp.Store())
     with pytest.raises(RuntimeError, match="run atlas.py generate"):
+        atlas_mcp.list_repos()
+
+
+def test_corrupt_graph_names_the_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(atlas_mcp, "ATLAS", tmp_path)
+    monkeypatch.setattr(atlas_mcp, "store", atlas_mcp.Store())
+    (tmp_path / "graph.json").write_text("{not json")
+    with pytest.raises(RuntimeError, match=re.escape(str(tmp_path / "graph.json"))):
         atlas_mcp.list_repos()

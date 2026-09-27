@@ -43,7 +43,10 @@ class Store:
             raise RuntimeError(f"no atlas at {path}; run atlas.py generate")
         mtime = path.stat().st_mtime
         if mtime != self.mtime:
-            self.graph = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                self.graph = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                raise RuntimeError(f"could not read {path}: {e}") from e
             self.manifests, self.blobs, self.mtime = {}, None, mtime
         return self.graph
 

@@ -1765,9 +1765,10 @@ def process_repo(cfg, name, repo, args):
                 cap=MAX_UPDATE_PROMPT_BYTES,
                 files=files,
             )
-            if len(prompt.encode("utf-8")) > MAX_UPDATE_PROMPT_BYTES:
+            prompt_size = len(prompt.encode("utf-8"))
+            if prompt_size > MAX_UPDATE_PROMPT_BYTES:
                 print(
-                    f"warn: {name}: update prompt is {len(prompt)} chars, regenerating in full",
+                    f"warn: {name}: update prompt is {prompt_size} bytes, regenerating in full",
                     file=sys.stderr,
                 )
                 mode, changed, prompt = "full", [], None
@@ -2293,8 +2294,12 @@ def cmd_unresolved(cfg, args):
     path = cfg["atlas_dir"] / "graph.json"
     if not path.exists():
         sys.exit(f"no graph at {path}; run atlas.py generate")
+    try:
+        graph = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        sys.exit(f"could not read {path}: {e}")
     groups = {}
-    for u in json.loads(path.read_text(encoding="utf-8")).get("unresolved", []):
+    for u in graph.get("unresolved", []):
         g = groups.setdefault(
             (u.get("kind", ""), u.get("key", "")), {"repos": set(), "candidates": set()}
         )

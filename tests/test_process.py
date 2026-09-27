@@ -127,6 +127,21 @@ def test_oversized_update_prompt_falls_back_to_full(
     assert "Current entry" not in stub_kiro[0]
 
 
+def test_oversized_update_prompt_warning_reports_bytes_not_chars(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro, monkeypatch, capsys
+):
+    """The cap it exceeded (MAX_UPDATE_PROMPT_BYTES) is a byte count, so the warning must count
+    the prompt the same way rather than len(str), which undercounts any multi-byte character."""
+    repo = make_repo("svc", files={"main.go": "package main"})
+    cfg = make_cfg()
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"))
+    commit(repo, "main.go", "package main // v2")
+    monkeypatch.setattr(atlas, "MAX_UPDATE_PROMPT_BYTES", 150)
+    monkeypatch.setattr(atlas, "mapper_prompt", lambda *a, **k: chr(0xE9) * 100)
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert "200 bytes" in capsys.readouterr().err
+
+
 def test_full_regeneration_lists_the_repos_tracked_files_once(
     make_repo, make_cfg, gen_args, stub_kiro, monkeypatch
 ):

@@ -190,6 +190,15 @@ def test_unresolved_requires_a_graph(make_cfg):
     assert "no graph" in str(e.value)
 
 
+def test_unresolved_reports_the_path_of_a_corrupt_graph(make_cfg):
+    cfg = make_cfg()
+    graph_path = cfg["atlas_dir"] / "graph.json"
+    atlas.write_text(graph_path, "{not json")
+    with pytest.raises(SystemExit) as e:
+        atlas.cmd_unresolved(cfg, argparse.Namespace(top=10))
+    assert str(graph_path) in str(e.value)
+
+
 def test_repo_map_warns_when_a_path_changes_name(make_cfg, capsys, tmp_path):
     cfg = make_cfg()
     atlas.save_repo_map(cfg, {"svc": tmp_path / "src" / "svc"})
