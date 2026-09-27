@@ -410,8 +410,9 @@ def test_freshness_over_every_repo_skips_the_commits_behind_call(atlas_env, tmp_
 
 
 def test_freshness_checks_every_repo_concurrently(atlas_env, tmp_path, monkeypatch):
-    """Each row is one `git rev-parse` subprocess; checking an org of repos must not cost as
-    long as launching them one after another."""
+    """Each row is one `git rev-parse` subprocess. A hardcoded wall-clock budget would flake on
+    a loaded CI runner, so this checks for overlap instead: five genuinely sequential 0.2s calls
+    never overlap in time, at any absolute speed, while concurrent ones do."""
     names = [f"svc-{i}" for i in range(5)]
     graph = {
         "generated_at": "x",
@@ -422,16 +423,21 @@ def test_freshness_checks_every_repo_concurrently(atlas_env, tmp_path, monkeypat
     }
     atlas_env(graph, {n: manifest(n) for n in names})
 
+    intervals = []
+
     def slow_run(cmd, **kwargs):
+        start = time.perf_counter()
         time.sleep(0.2)
+        intervals.append((start, time.perf_counter()))
         return subprocess.CompletedProcess(cmd, 0, stdout="a" * 40, stderr="")
 
     monkeypatch.setattr(atlas_mcp.subprocess, "run", slow_run)
-    t0 = time.perf_counter()
     got = json.loads(atlas_mcp.freshness())
-    elapsed = time.perf_counter() - t0
     assert got["checked"] == 5
-    assert elapsed < 0.6  # run one after another, 5 repos at 0.2s each would take 1.0s+
+    overlapping = any(
+        s1 < e2 and s2 < e1 for i, (s1, e1) in enumerate(intervals) for s2, e2 in intervals[i + 1 :]
+    )
+    assert overlapping
 
 
 def test_resolve_refuses_to_guess_when_an_identifier_is_claimed_twice(atlas_env, tmp_path):
