@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tomllib
@@ -1555,6 +1556,14 @@ def log_append(log_path, text):
         fh.write(text)
 
 
+def rotate_log(log_path):
+    """Called once per process_repo run, before its first attempt: both attempts of one run
+    (the retry on unparseable output) still land in the same file, but a cron run every few
+    hours would otherwise make log_append's \"a\" mode grow every repo's log forever."""
+    if log_path.exists():
+        log_path.replace(log_path.with_name(log_path.name + ".1"))
+
+
 def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
     name = cfg["kiro_agent"] if cfg["kiro_agent"] is not None else DEFAULT_AGENTS[mapper]
     agent = ["--agent", name] if name else []
@@ -1577,37 +1586,52 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
     # The prompt goes in on stdin, which has no size limit of its own, and is logged by length
     # rather than text so repo content never lands in the log.
     header = f"=== attempt {stamp} ===\n$ {' '.join(cmd)} <prompt {len(prompt)} chars>\n"
-    try:
-        r = subprocess.run(
-            cmd,
-            cwd=cwd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=cfg["timeout_minutes"] * 60,
-            env={**os.environ, "NO_COLOR": "1"},
-            check=False,
-        )
-    except subprocess.TimeoutExpired as e:
-        partial = (
-            e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-        )
-        log_append(log_path, header + "TIMEOUT\n" + ANSI.sub("", partial) + "\n")
-        raise RuntimeError(
-            "timed out; usually a tool call waiting for approval (see README)"
-        ) from e
+    # A plain subprocess.run kills only the direct child on timeout, so a tool call kiro-cli
+    # shelled out to would outlive the run that reports the timeout. start_new_session makes
+    # kiro-cli the leader of its own process group instead, so the whole group can be killed.
+    can_kill_group = hasattr(os, "killpg")
+    with subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "NO_COLOR": "1"},
+        start_new_session=can_kill_group,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(input=prompt, timeout=cfg["timeout_minutes"] * 60)
+        except subprocess.TimeoutExpired as e:
+            if can_kill_group:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+            # The documented pattern for this exact case: the first communicate() timed out,
+            # the second drains whatever had already printed before the kill.
+            stdout, stderr = proc.communicate()
+            log_append(log_path, header + "TIMEOUT\n" + redact(ANSI.sub("", stdout or "")) + "\n")
+            raise RuntimeError(
+                "timed out; usually a tool call waiting for approval (see README)"
+            ) from e
+        returncode = proc.returncode
+    # Explore mode lets the model read repo files with its own tool, so what it echoes back
+    # never passed through the bundle's redact() the way bundle-mode content does; the log is
+    # the last stage before it reaches disk. parse_output below runs on the unredacted stdout,
+    # so redaction here cannot affect what the manifest is built from.
     log_append(
         log_path,
         header
-        + f"exit={r.returncode}\n\n"
-        + ANSI.sub("", r.stdout or "")
+        + f"exit={returncode}\n\n"
+        + redact(ANSI.sub("", stdout or ""))
         + "\n--- stderr ---\n"
-        + ANSI.sub("", r.stderr or "")
+        + redact(ANSI.sub("", stderr or ""))
         + "\n",
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"kiro-cli exited {r.returncode}; see {log_path}")
-    return parse_output(ANSI.sub("", r.stdout or ""))
+    if returncode != 0:
+        raise RuntimeError(f"kiro-cli exited {returncode}; see {log_path}")
+    return parse_output(ANSI.sub("", stdout or ""))
 
 
 def contained(root, path, resolved_root=None):
@@ -1776,6 +1800,7 @@ def process_repo(cfg, name, repo, args):
             prompt = mapper_prompt(cfg, repo, mapper, full_template, {}, files=files)
         prompt_bytes = len(prompt.encode("utf-8"))
         log = cfg["atlas_dir"] / "logs" / f"{name}.log"
+        rotate_log(log)
         attempts = 1
         try:
             manifest = run_kiro(cfg, repo, prompt, log, mapper)

@@ -253,46 +253,67 @@ def test_parse_output_rejects_a_non_object():
         atlas.parse_output("<<<ATLAS_JSON\n[1,2]\nATLAS_JSON>>>")
 
 
+class _FakeProc:
+    """Stands in for the Popen object run_kiro manages by hand (rather than subprocess.run) so
+    that a timeout can kill kiro-cli's whole process group, not just the direct child. `raises`,
+    when given, fires on the first communicate() call only: the second is the drain that follows
+    a kill, exactly as the stdlib docs show for this pattern."""
+
+    # Far past any real PID, so a test that does not mock os.killpg still cannot reach a real
+    # process group by chance when run_kiro's timeout path calls it for real.
+    def __init__(self, stdout="", stderr="", returncode=0, pid=999_999_999, raises=None):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.pid = pid
+        self._raises = raises
+        self.communicate_calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls.append({"input": input, "timeout": timeout})
+        if self._raises is not None and len(self.communicate_calls) == 1:
+            raise self._raises
+        return self.stdout, self.stderr
+
+
 def test_run_kiro_appends_each_attempt_to_the_log(make_repo, make_cfg, monkeypatch, tmp_path):
     repo = make_repo("svc")
     cfg = make_cfg()
     log = tmp_path / "logs" / "svc.log"
 
-    class Result:
-        returncode = 0
-        stdout = '<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>'
-        stderr = ""
-
-    monkeypatch.setattr(atlas.subprocess, "run", lambda *a, **k: Result())
+    monkeypatch.setattr(
+        atlas.subprocess,
+        "Popen",
+        lambda *a, **k: _FakeProc(stdout='<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>'),
+    )
     atlas.run_kiro(cfg, repo, "prompt one", log)
     atlas.run_kiro(cfg, repo, "prompt two", log)
     text = log.read_text()
     assert text.count("=== attempt") == 2
 
 
-class _Result:
-    returncode = 0
-    stderr = ""
-
-    def __init__(self, stdout):
-        self.stdout = stdout
-
-
-def _spy_run(monkeypatch, stdout='<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>'):
+def _spy_popen(monkeypatch, stdout='<<<ATLAS_JSON\n{"summary": "s"}\nATLAS_JSON>>>', **proc_kwargs):
     seen = {}
 
     def spy(cmd, **kwargs):
         seen["cmd"] = list(cmd)
         seen["kwargs"] = kwargs
-        return _Result(stdout)
+        seen["proc"] = _FakeProc(stdout=stdout, **proc_kwargs)
+        return seen["proc"]
 
-    monkeypatch.setattr(atlas.subprocess, "run", spy)
+    monkeypatch.setattr(atlas.subprocess, "Popen", spy)
     return seen
 
 
 def test_explore_mode_uses_the_read_only_mapper_agent(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--agent") + 1] == "atlas-mapper"
@@ -300,24 +321,23 @@ def test_explore_mode_uses_the_read_only_mapper_agent(make_cfg, monkeypatch, tmp
 
 def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg(kiro_agent="")
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
     assert "--agent" not in seen["cmd"]
 
 
 def test_the_prompt_is_sent_on_stdin_and_not_on_the_command_line(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "map this repo", tmp_path / "logs" / "svc.log")
-    assert seen["kwargs"]["input"] == "map this repo"
+    assert seen["proc"].communicate_calls[0]["input"] == "map this repo"
     assert "map this repo" not in seen["cmd"]
-    assert "stdin" not in seen["kwargs"]
 
 
 def test_the_log_records_the_prompt_length_not_its_text(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
     log = tmp_path / "logs" / "svc.log"
-    _spy_run(monkeypatch)
+    _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "secret-looking prompt text", log)
     text = log.read_text(encoding="utf-8")
     assert "<prompt 26 chars>" in text
@@ -326,7 +346,7 @@ def test_the_log_records_the_prompt_length_not_its_text(make_cfg, monkeypatch, t
 
 def test_command_line_disables_line_wrapping(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--wrap") + 1] == "never"
@@ -362,14 +382,86 @@ def test_parse_output_rejects_a_block_broken_by_hard_wrapping():
         atlas.parse_output('<<<ATLAS_JSON\n{"summary": "a very long\nvalue"}\nATLAS_JSON>>>')
 
 
+def test_the_log_redacts_secrets_the_model_echoed(make_cfg, monkeypatch, tmp_path):
+    """Explore mode lets the model read files with its own tool, so anything it echoes back
+    never passes through the bundle's redact() the way a bundle-mode prompt's content does.
+    The log is the last line of defense before that reaches disk."""
+    cfg = make_cfg()
+    log = tmp_path / "logs" / "svc.log"
+    token = "ghp_" + "A" * 36
+    _spy_popen(
+        monkeypatch,
+        stdout=f'<<<ATLAS_JSON\n{{"summary": "s"}}\nATLAS_JSON>>>\nfound token {token}',
+        stderr=f"warning: also saw {token} in .env",
+    )
+    manifest = atlas.run_kiro(cfg, tmp_path, "p", log)
+    assert manifest == {"summary": "s"}  # parsing itself still sees the unredacted output
+    text = log.read_text(encoding="utf-8")
+    assert token not in text
+    assert text.count("<redacted>") == 2
+
+
+def test_a_timeout_kills_the_whole_process_group_and_redacts_the_drained_output(
+    make_cfg, monkeypatch, tmp_path
+):
+    cfg = make_cfg()
+    log = tmp_path / "logs" / "svc.log"
+    token = "ghp_" + "B" * 36
+    killed = {}
+    monkeypatch.setattr(atlas.os, "killpg", lambda pid, sig: killed.update(pid=pid, sig=sig))
+    seen = _spy_popen(
+        monkeypatch,
+        stdout=f"leaked {token}",
+        raises=atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1),
+    )
+    with pytest.raises(RuntimeError, match="approval"):
+        atlas.run_kiro(cfg, tmp_path, "p", log)
+    assert killed["pid"] == seen["proc"].pid
+    assert token not in log.read_text(encoding="utf-8")
+    assert "<redacted>" in log.read_text(encoding="utf-8")
+    # first communicate() times out, the second (after the kill) drains what printed already
+    assert len(seen["proc"].communicate_calls) == 2
+
+
+def test_a_new_run_rotates_the_previous_log_instead_of_growing_forever(
+    make_repo, make_cfg, gen_args, stub_kiro
+):
+    repo = make_repo("svc", files={"main.go": "package main"})
+    cfg = make_cfg()
+    log_dir = cfg["atlas_dir"] / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "svc.log").write_text("=== attempt old ===\nold run\n")
+    atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert (log_dir / "svc.log.1").read_text() == "=== attempt old ===\nold run\n"
+    assert not (log_dir / "svc.log").exists()  # stub_kiro never writes; rotation moved it aside
+
+
+def test_a_restamp_does_not_touch_the_existing_log(
+    make_repo, make_cfg, make_manifest, gen_args, stub_kiro
+):
+    """restamp makes no model call, so there is no new attempt to separate from the last one."""
+    repo = make_repo("svc")
+    cfg = make_cfg()
+    seed(cfg, make_manifest, repo, "svc", atlas.git(repo, "rev-parse", "HEAD"), facts_version=0)
+    log_dir = cfg["atlas_dir"] / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "svc.log").write_text("=== attempt old ===\nold run\n")
+    _, mode, _, _ = atlas.process_repo(cfg, "svc", repo, gen_args)
+    assert mode == "restamp"
+    assert (log_dir / "svc.log").read_text() == "=== attempt old ===\nold run\n"
+    assert not (log_dir / "svc.log.1").exists()
+
+
 def test_timeout_is_logged_and_blamed_on_approval(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
     log = tmp_path / "logs" / "svc.log"
-
-    def boom(*_a, **_k):
-        raise atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1, output=b"partial output")
-
-    monkeypatch.setattr(atlas.subprocess, "run", boom)
+    # No real process exists at this pid, so the real os.killpg the timeout path calls raises
+    # ProcessLookupError; run_kiro must swallow that rather than let it mask the timeout.
+    _spy_popen(
+        monkeypatch,
+        stdout="partial output",
+        raises=atlas.subprocess.TimeoutExpired(cmd="kiro-cli", timeout=1),
+    )
     with pytest.raises(RuntimeError, match="approval"):
         atlas.run_kiro(cfg, tmp_path, "p", log)
     text = log.read_text(encoding="utf-8")
@@ -723,7 +815,7 @@ def test_a_deterministic_identifier_that_is_generic_never_reaches_the_manifest(
 
 def test_bundle_mode_uses_the_tool_free_bundle_agent(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log", mapper="bundle")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--agent") + 1] == "atlas-bundle"
@@ -731,7 +823,7 @@ def test_bundle_mode_uses_the_tool_free_bundle_agent(make_cfg, monkeypatch, tmp_
 
 def test_an_explicit_agent_overrides_both_modes(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg(kiro_agent="mine")
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log", mapper="bundle")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--agent") + 1] == "mine"
@@ -740,14 +832,14 @@ def test_an_explicit_agent_overrides_both_modes(make_cfg, monkeypatch, tmp_path)
 def test_bundle_mode_never_runs_inside_the_mapped_repo(make_cfg, monkeypatch, tmp_path):
     """Running in the repo loads that repo's own steering, hooks and MCP servers unattended."""
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log", mapper="bundle")
     assert seen["kwargs"]["cwd"] == cfg["atlas_dir"]
 
 
 def test_explore_mode_still_runs_inside_the_repo(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg()
-    seen = _spy_run(monkeypatch)
+    seen = _spy_popen(monkeypatch)
     atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log", mapper="explore")
     assert seen["kwargs"]["cwd"] == tmp_path
 
