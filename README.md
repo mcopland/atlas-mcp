@@ -136,6 +136,8 @@ uv run --group dev pytest
 
 `pyproject.toml` holds the test configuration and the dev dependency group. It deliberately sets `package = false`: this is two standalone scripts, not an installable package, so nothing is ever built or installed. Runtime dependencies live in each script's `# /// script` header instead, because `uv run --script` ignores `pyproject.toml` entirely.
 
+`uv run --group dev python bench/loadtest.py` runs a synthetic-org load test (extraction, `generate`, `build()`, and the MCP tools) to check performance at scale; it is not part of the test suite and does not run in CI.
+
 Two lockfiles, with different jobs:
 
 - `atlas_mcp.py.lock` pins the MCP server's runtime, `mcp` plus its 29 transitive packages, by hash. This is the one that matters operationally, because Kiro launches the server with `--locked`.
