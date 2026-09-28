@@ -15,7 +15,7 @@ dev = ["pytest>=8", "mcp>=1", "ruff>=0.16"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "diag"]
 addopts = "-q"
 
 [tool.ruff]
@@ -23,3 +23,10 @@ addopts = "-q"
 # dev ruff` gives here: ruff's own default line-length is 88, and this repo is wrapped at 100.
 # target-version is left to ruff's inference from requires-python above.
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# diag/ scripts are handed to testers on machines this project's own requires-python does not
+# promise, so they carry their own PEP 723 floor (>=3.8) and check sys.version_info at runtime.
+# Ruff infers target-version from requires-python above (>=3.11) project-wide, so it reads that
+# check as dead and would otherwise ask for it to be removed.
+"diag/*.py" = ["UP036"]
