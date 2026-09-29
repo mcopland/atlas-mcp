@@ -120,6 +120,20 @@ Schedule it, for example every 6 hours with cron. Spell out the path to `uv` fro
 - `atlas.py prune` lists manifests with no matching clone (repo deleted, renamed, or newly excluded). They are excluded from the graph automatically; `--apply` moves the files to `atlas/repos/_orphans/`. Nothing is ever deleted.
 - `build`, `prune`, and `status` refuse to run when repo discovery comes back empty, so an unmounted `repo_roots` cannot quietly empty the atlas.
 
+## Diagnostics (testers)
+
+If you are trying this out on a machine the maintainer does not have (a different OS, a WSL distro, a machine with Kiro CLI actually installed), `diag/` gives you something to run and send back instead of describing your setup by hand:
+
+```bash
+git pull --ff-only
+python3 diag/check_all.py          # system, toolchain, kiro-cli config, MCP server: no Kiro calls
+python3 diag/check_kiro.py --live  # add real kiro-cli calls against a throwaway repo (~3-4 requests)
+```
+
+Each script prints one report to stdout, between `----- BEGIN ATLAS DIAG -----` and `----- END ATLAS DIAG -----` markers. Copy that and send it back; nothing is written to this repo, to `atlas_dir`, or committed anywhere, so there is nothing to clean up before or after running it. The report is redacted before it is printed: your home directory, username, hostname and any secret-shaped values are replaced, and command output is capped (pass `--full` to lift the cap if something got cut off that matters). `--only SECTION` runs a single section, once you know which one you're iterating on. The maintainer reads the report, changes the repo, and you `git pull` and run it again; you never need to commit anything for this loop to work.
+
+`diag/check_env.py`, `diag/check_kiro.py` and `diag/check_mcp.py` run standalone too, and (unlike the rest of the repo) work back to Python 3.8, so `python3 diag/check_env.py` runs on whatever interpreter is already on your machine even if it can't run `atlas.py` itself.
+
 ## Troubleshooting
 
 - **Timeouts:** in `explore` mode, almost always a tool call waiting for approval in headless mode. `bundle` mode has no tools to approve, so a timeout there is the model or the network. Check `atlas/logs/NAME.log`, which keeps one section per attempt. Reading inside the repo is allowed by default in v3; if the model insists on other tools, pass a narrow trust flag via `kiro_extra_args` (see `kiro-cli chat --help` for `--trust-tools`), never `--trust-all-tools`, which `atlas.py` refuses to start with.
