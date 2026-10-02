@@ -226,8 +226,14 @@ def live_generate(report: Report, atlas, cfg: dict, tmp: Path, mapper_mode: str)
         )
         (src / ".env.example").write_text("ORDERS_SERVICE_URL=https://orders.internal\n")
         env = dict(os.environ)
+        # Blanking the global config also drops user.name/user.email, and git then guesses an
+        # identity from the OS account, which fails ("empty ident name") when it has no full name.
         env.update(
             {
+                "GIT_AUTHOR_NAME": "atlas-diag",
+                "GIT_AUTHOR_EMAIL": "atlas-diag@example.invalid",
+                "GIT_COMMITTER_NAME": "atlas-diag",
+                "GIT_COMMITTER_EMAIL": "atlas-diag@example.invalid",
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_SYSTEM": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",

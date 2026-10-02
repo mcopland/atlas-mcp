@@ -427,6 +427,30 @@ def test_run_live_reports_invalid_user_config_without_crashing(monkeypatch, tmp_
     assert "FAIL: could not build a live config" in rendered
 
 
+def test_live_generate_pins_git_identity_for_probe_commit(monkeypatch, tmp_path):
+    """live_generate blanks the global git config, which also drops user.name/user.email; on a
+    machine whose OS account has no full name the probe's `git commit` then dies with
+    "empty ident name". The identity has to come from the env it passes."""
+    atlas = pytest.importorskip("atlas")
+    check_kiro = pytest.importorskip("check_kiro")
+
+    commit_envs = []
+
+    def fake_run(cmd, timeout=None, env=None, **_kwargs):
+        if "commit" in cmd:
+            commit_envs.append(env)
+            return diaglib.RunResult(cmd, 128, "", "Author identity unknown", None)
+        return diaglib.RunResult(cmd, 0, "", "", None)
+
+    monkeypatch.setattr(check_kiro, "run", fake_run)
+    report = diaglib.Report("check_kiro")
+    check_kiro.live_generate(report, atlas, {}, tmp_path, "bundle")
+
+    assert commit_envs, "live_generate never reached git commit"
+    for var in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        assert commit_envs[0].get(var), f"{var} not set for the probe commit"
+
+
 def test_live_probes_skip_below_python_3_11(monkeypatch, tmp_path):
     check_kiro = pytest.importorskip("check_kiro")
     monkeypatch.setattr(check_kiro.sys, "version_info", (3, 10, 0))
