@@ -31,6 +31,7 @@ from diaglib import (
     Report,
     build_argparser,
     classify_bin,
+    configured_kiro_bin,
     flag_support,
     inspect_kiro_home,
     kiro_home,
@@ -40,31 +41,17 @@ from diaglib import (
 
 SECTIONS = ["install", "flags", "models", "auth", "kiro-home"]
 KIT = diaglib.KIT
-KIRO_CHAT_FLAGS = [
-    "--no-interactive",
-    "--wrap",
-    "--model",
-    "--agent",
-    "--trust-tools",
-    "--output-format",
-    "--engine",
-]
-
-
-def _kiro_bin() -> str:
-    config_path = KIT / "config.json"
-    if config_path.is_file():
-        try:
-            cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            return str(cfg.get("kiro_bin", "kiro-cli"))
-        except (OSError, ValueError):
-            pass
-    return "kiro-cli"
+# What atlas.run_kiro() actually passes on every call (atlas.py:1633); missing one of these is a
+# real compatibility problem.
+REQUIRED_CHAT_FLAGS = ["--no-interactive", "--wrap", "--model", "--agent"]
+# Only relevant if a tester opts into them through kiro_extra_args (see README's "no <<<ATLAS_JSON
+# block" troubleshooting entry); missing one of these is only a problem if they've done that.
+OPTIONAL_CHAT_FLAGS = ["--trust-tools", "--output-format", "--engine"]
 
 
 def check_install(report: Report) -> None:
     with report.section("install") as s:
-        kiro_bin = _kiro_bin()
+        kiro_bin = configured_kiro_bin(KIT)
         resolved = shutil.which(kiro_bin) or kiro_bin
         s.ok(f"kiro_bin: {scrub(kiro_bin)} -> classified as {classify_bin(resolved)}")
         version = run([kiro_bin, "--version"], timeout=10)
@@ -77,22 +64,39 @@ def check_install(report: Report) -> None:
             s.code(scrub(help_text.stdout))
 
 
+def _extra_args_pass(flag: str, extra_args: list) -> bool:
+    """True if kiro_extra_args passes `flag`, either as its own element or in kiro-cli's
+    '--flag=value' form (see `kiro-cli chat --help`'s --trust-tools example)."""
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in extra_args)
+
+
 def check_flags(report: Report) -> None:
     with report.section("flags") as s:
-        kiro_bin = _kiro_bin()
+        cfg = _user_cfg()
+        kiro_bin = str(cfg.get("kiro_bin", "kiro-cli"))
         help_result = run([kiro_bin, "chat", "--help"], timeout=10)
         if help_result.error:
             s.fail(f"kiro-cli chat --help: {help_result.error}")
             return
-        support = flag_support(help_result.stdout, KIRO_CHAT_FLAGS)
-        for flag, present in support.items():
+        help_text = help_result.stdout
+        required = flag_support(help_text, REQUIRED_CHAT_FLAGS)
+        for flag, present in required.items():
             (s.ok if present else s.warn)(f"{flag}: {'present' if present else 'not in --help'}")
-        s.code(scrub(help_result.stdout))
+        extra_args = cfg.get("kiro_extra_args", [])
+        optional = flag_support(help_text, OPTIONAL_CHAT_FLAGS)
+        for flag, present in optional.items():
+            if present:
+                s.ok(f"{flag}: present")
+            elif _extra_args_pass(flag, extra_args):
+                s.warn(f"{flag}: not in --help, but kiro_extra_args passes it")
+            else:
+                s.ok(f"{flag}: not in --help (optional; atlas does not pass it)")
+        s.code(scrub(help_text))
 
 
 def check_models(report: Report) -> None:
     with report.section("models") as s:
-        kiro_bin = _kiro_bin()
+        kiro_bin = configured_kiro_bin(KIT)
         result = run([kiro_bin, "chat", "--list-models"], timeout=30)
         if result.error:
             s.fail(f"kiro-cli chat --list-models: {result.error}")
@@ -115,15 +119,16 @@ def check_models(report: Report) -> None:
 def check_auth(report: Report) -> None:
     with report.section("auth") as s:
         s.ok(f"KIRO_API_KEY: {'set' if 'KIRO_API_KEY' in os.environ else 'unset'}")
-        kiro_bin = _kiro_bin()
-        for args in (["whoami"], ["doctor"]):
-            result = run([kiro_bin, *args], timeout=15)
-            label = " ".join(args)
-            if result.error:
-                s.warn(f"kiro-cli {label}: {result.error}")
-                continue
-            s.ok(f"kiro-cli {label}: exit={result.returncode}")
-            s.code(scrub(result.stdout + result.stderr))
+        kiro_bin = configured_kiro_bin(KIT)
+        # Not `doctor`: it writes its "Testing kiro-cli-term..." probe into the kiro-cli-term
+        # socket rather than stdout, so that text lands in the tester's shell input buffer after
+        # this script exits instead of in the captured output. whoami alone covers login state.
+        result = run([kiro_bin, "whoami"], timeout=15)
+        if result.error:
+            s.warn(f"kiro-cli whoami: {result.error}")
+            return
+        s.ok(f"kiro-cli whoami: exit={result.returncode}")
+        s.code(scrub(result.stdout + result.stderr))
 
 
 def check_kiro_home(report: Report) -> None:

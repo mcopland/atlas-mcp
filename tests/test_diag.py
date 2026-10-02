@@ -48,6 +48,39 @@ def test_scrub_applies_atlas_redact_when_available():
     assert scrubbed != text
 
 
+def test_scrub_redacts_email_domain_when_local_part_matches_username():
+    """Regression: scrub() used to replace the username before running EMAIL_RE, so
+    'alice@corp.example.com' became '<user>@corp.example.com' and the company domain leaked."""
+    user = diaglib.current_user()
+    if not user:
+        pytest.skip("current_user() returned empty on this platform")
+    text = f"git config user.email {user}@corp.example.com"
+    scrubbed = diaglib.scrub(text)
+    assert "corp.example.com" not in scrubbed
+    assert "<redacted-email>" in scrubbed
+
+
+def test_scrub_redacts_aws_account_id_in_arn():
+    fake_account = "123456789012"  # shaped like an account id, not a real one
+    text = f"arn:aws:codewhisperer:us-east-1:{fake_account}:profile/3YAYXXU4DPNH"
+    scrubbed = diaglib.scrub(text)
+    assert fake_account not in scrubbed
+
+
+def test_scrub_redacts_awsapps_subdomain():
+    text = "Logged in with IAM Identity Center (https://acme-corp.awsapps.com/start)"
+    scrubbed = diaglib.scrub(text)
+    assert "acme-corp" not in scrubbed
+
+
+def test_scrub_redacts_awsapps_subdomain_without_a_scheme():
+    """Regression: the first AWSAPPS_RE required a literal 'https://' prefix, so a start URL
+    printed without a scheme (or as http://) would leak the org-identifying subdomain."""
+    text = "Start URL: acme-corp.awsapps.com/start"
+    scrubbed = diaglib.scrub(text)
+    assert "acme-corp" not in scrubbed
+
+
 # ---------- clip ----------
 
 
@@ -404,6 +437,107 @@ def test_live_probes_skip_below_python_3_11(monkeypatch, tmp_path):
     assert "uv run --script diag/check_kiro.py --live" in rendered
 
 
+# ---------- diaglib.configured_kiro_bin ----------
+
+
+def test_configured_kiro_bin_reads_config(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"kiro_bin": "/abs/kiro-cli"}))
+    assert diaglib.configured_kiro_bin(tmp_path) == "/abs/kiro-cli"
+
+
+def test_configured_kiro_bin_falls_back_without_config(tmp_path):
+    assert diaglib.configured_kiro_bin(tmp_path) == "kiro-cli"
+
+
+def test_configured_kiro_bin_falls_back_on_invalid_json(tmp_path):
+    (tmp_path / "config.json").write_text("{not json")
+    assert diaglib.configured_kiro_bin(tmp_path) == "kiro-cli"
+
+
+# ---------- check_kiro.py: auth, flags ----------
+
+
+def test_check_auth_never_invokes_doctor(monkeypatch, tmp_path):
+    """Regression: `kiro-cli doctor` writes into the kiro-cli-term socket rather than stdout, so
+    its "Testing kiro-cli-term..." text lands in the tester's shell input buffer after the script
+    exits. whoami alone covers what auth needs to check."""
+    check_kiro = pytest.importorskip("check_kiro")
+    monkeypatch.setattr(check_kiro, "KIT", tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return diaglib.RunResult(cmd, 0, "ok", "", None)
+
+    monkeypatch.setattr(check_kiro, "run", fake_run)
+    report = diaglib.Report("check_kiro")
+    check_kiro.check_auth(report)
+    assert all("doctor" not in cmd for cmd in calls)
+
+
+FAKE_CHAT_HELP = (
+    "Options:\n"
+    "  --no-interactive\n"
+    "  --wrap\n"
+    "  --model\n"
+    "  --agent\n"
+    "  --trust-tools\n"
+    "  --output-format\n"
+)  # deliberately omits --engine, matching kiro-cli 2.27.0's V3-default --help
+
+
+def test_check_flags_optional_flag_missing_is_ok_without_extra_args(monkeypatch, tmp_path):
+    check_kiro = pytest.importorskip("check_kiro")
+    monkeypatch.setattr(check_kiro, "KIT", tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"kiro_extra_args": []}))
+
+    def fake_run(cmd, **kwargs):
+        return diaglib.RunResult(cmd, 0, FAKE_CHAT_HELP, "", None)
+
+    monkeypatch.setattr(check_kiro, "run", fake_run)
+    report = diaglib.Report("check_kiro")
+    check_kiro.check_flags(report)
+    rendered = report.render()
+    assert "WARN: --engine" not in rendered
+
+
+def test_check_flags_warns_when_extra_args_need_a_missing_optional_flag(monkeypatch, tmp_path):
+    check_kiro = pytest.importorskip("check_kiro")
+    monkeypatch.setattr(check_kiro, "KIT", tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"kiro_extra_args": ["--output-format", "stream-json", "--engine", "v3"]})
+    )
+
+    def fake_run(cmd, **kwargs):
+        return diaglib.RunResult(cmd, 0, FAKE_CHAT_HELP, "", None)
+
+    monkeypatch.setattr(check_kiro, "run", fake_run)
+    report = diaglib.Report("check_kiro")
+    check_kiro.check_flags(report)
+    rendered = report.render()
+    assert "WARN: --engine" in rendered
+
+
+def test_check_flags_recognizes_equals_form_extra_args(monkeypatch, tmp_path):
+    """Regression: `flag in extra_args` missed '--trust-tools=fs_read,fs_write' (the equals-sign
+    form kiro-cli's own --help documents), reporting it as unused even though it is passed."""
+    check_kiro = pytest.importorskip("check_kiro")
+    monkeypatch.setattr(check_kiro, "KIT", tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"kiro_extra_args": ["--trust-tools=fs_read,fs_write"]})
+    )
+    help_without_trust_tools = FAKE_CHAT_HELP.replace("  --trust-tools\n", "")
+
+    def fake_run(cmd, **kwargs):
+        return diaglib.RunResult(cmd, 0, help_without_trust_tools, "", None)
+
+    monkeypatch.setattr(check_kiro, "run", fake_run)
+    report = diaglib.Report("check_kiro")
+    check_kiro.check_flags(report)
+    rendered = report.render()
+    assert "WARN: --trust-tools" in rendered
+
+
 # ---------- check_env.py internals ----------
 
 
@@ -418,6 +552,76 @@ def test_check_config_reports_invalid_config_without_crashing(monkeypatch, tmp_p
     check_env.check_config(report)  # must not raise SystemExit
     rendered = report.render()
     assert "FAIL" in rendered
+
+
+def test_check_tools_resolves_crontab_via_which(monkeypatch):
+    """Regression: crontab has no --version flag, so the old probe reported its usage-error
+    stderr ("crontab: invalid option -- '-'") as if it were a version string."""
+    check_env = pytest.importorskip("check_env")
+    monkeypatch.setattr(
+        check_env.shutil, "which", lambda name: "/usr/bin/crontab" if name == "crontab" else None
+    )
+    report = diaglib.Report("check_env")
+    check_env.check_tools(report)
+    rendered = report.render()
+    assert "invalid option" not in rendered
+    assert "crontab: /usr/bin/crontab" in rendered or "crontab: ~" in rendered
+
+
+def test_check_tools_no_minimal_path_warn_with_working_absolute_kiro_bin(monkeypatch, tmp_path):
+    """Regression: the minimal-PATH probe always ran bare `kiro-cli`, ignoring a configured
+    absolute kiro_bin that actually resolves, producing a false WARN."""
+    check_env = pytest.importorskip("check_env")
+    fake_bin = tmp_path / "fake-kiro-cli"
+    fake_bin.write_text("#!/usr/bin/env sh\necho fake-kiro-cli 1.0\n")
+    fake_bin.chmod(0o755)
+    monkeypatch.setattr(check_env, "KIT", tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"kiro_bin": str(fake_bin)}))
+    report = diaglib.Report("check_env")
+    check_env.check_tools(report)
+    rendered = report.render()
+    assert "does not resolve under a cron-like minimal PATH" not in rendered
+    assert "resolves under a cron-like minimal PATH" in rendered
+
+
+def test_check_tools_minimal_path_probes_configured_relative_kiro_bin(monkeypatch, tmp_path):
+    """Regression: a non-absolute, non-default kiro_bin (e.g. a custom wrapper script name) was
+    never actually probed; the minimal-PATH check always ran the literal 'kiro-cli'."""
+    check_env = pytest.importorskip("check_env")
+    monkeypatch.setattr(check_env, "KIT", tmp_path)
+    monkeypatch.setattr(check_env.shutil, "which", lambda name: None)
+    (tmp_path / "config.json").write_text(json.dumps({"kiro_bin": "my-custom-kiro"}))
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return diaglib.RunResult(cmd, 0, "my-custom-kiro 1.0", "", None)
+
+    monkeypatch.setattr(check_env, "run", fake_run)
+    report = diaglib.Report("check_env")
+    check_env.check_tools(report)
+    assert any(cmd[0] == "my-custom-kiro" for cmd in calls)
+
+
+def test_check_tools_minimal_path_reports_non_not_found_errors(monkeypatch, tmp_path):
+    """Regression: the non-absolute branch's `if ... == "not found": ... elif ... is None: ...`
+    chain silently dropped any other error (e.g. a timeout) from the report."""
+    check_env = pytest.importorskip("check_env")
+    monkeypatch.setattr(check_env, "KIT", tmp_path)
+    monkeypatch.setattr(check_env.shutil, "which", lambda name: None)
+    (tmp_path / "config.json").write_text(json.dumps({"kiro_bin": "kiro-cli"}))
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["kiro-cli", "--version"] and kwargs.get("env"):
+            return diaglib.RunResult(cmd, None, "", "", "timed out after 10s")
+        return diaglib.RunResult(cmd, 0, "ok", "", None)
+
+    monkeypatch.setattr(check_env, "run", fake_run)
+    report = diaglib.Report("check_env")
+    check_env.check_tools(report)
+    rendered = report.render()
+    assert "cron-like minimal PATH" in rendered
+    assert "timed out" in rendered
 
 
 def test_nearest_existing_ancestor_walks_up_to_an_existing_dir(tmp_path):

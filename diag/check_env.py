@@ -17,6 +17,7 @@ import json
 import locale
 import os
 import platform
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -25,6 +26,7 @@ import diaglib
 from diaglib import (  # noqa: F401
     Report,
     build_argparser,
+    configured_kiro_bin,
     current_host,
     current_user,
     env_summary,
@@ -109,7 +111,7 @@ def check_tools(report: Report) -> None:
         for name, args in (("git", ["--version"]), ("uv", ["--version"])):
             r = run([name, *args], timeout=10)
             s.ok(f"{name}: {r.stdout.strip() or r.error or r.stderr.strip()}")
-        for name in ("kiro-cli", "kiro-cli.exe", "crontab", "flock"):
+        for name in ("kiro-cli", "kiro-cli.exe", "flock"):
             r = run([name, "--version"], timeout=10)
             if r.error == "not found":
                 s.warn(f"{name}: not found on PATH")
@@ -118,14 +120,38 @@ def check_tools(report: Report) -> None:
             else:
                 first_line = (r.stdout or r.stderr).strip().splitlines()[:1]
                 s.ok(f"{name}: {first_line[0] if first_line else f'exit {r.returncode}'}")
+        # crontab has no --version; asking for one just reports its usage-error stderr as if it
+        # were a version string, so this resolves it on PATH instead.
+        crontab_path = shutil.which("crontab")
+        if crontab_path:
+            s.ok(f"crontab: {scrub(crontab_path)}")
+        else:
+            s.warn("crontab: not found on PATH")
+
+        kiro_bin = configured_kiro_bin(KIT)
         minimal_env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "")}
-        r = run(["kiro-cli", "--version"], timeout=10, env=minimal_env)
-        if r.error == "not found":
-            s.warn(
-                "kiro-cli not found under a cron-like minimal PATH; set kiro_bin to an absolute path"
-            )
-        elif r.error is None:
-            s.ok("kiro-cli resolves under a cron-like minimal PATH")
+        if os.path.isabs(kiro_bin):
+            r = run([kiro_bin, "--version"], timeout=10, env=minimal_env)
+            if r.error:
+                s.warn(
+                    f"kiro_bin {scrub(kiro_bin)} does not resolve under a cron-like minimal "
+                    f"PATH: {r.error}"
+                )
+            else:
+                s.ok("kiro_bin resolves under a cron-like minimal PATH")
+        else:
+            r = run([kiro_bin, "--version"], timeout=10, env=minimal_env)
+            if r.error == "not found":
+                s.warn(
+                    f"{scrub(kiro_bin)} not found under a cron-like minimal PATH; "
+                    "set kiro_bin to an absolute path"
+                )
+            elif r.error:
+                s.warn(
+                    f"{scrub(kiro_bin)} did not resolve under a cron-like minimal PATH: {r.error}"
+                )
+            else:
+                s.ok(f"{scrub(kiro_bin)} resolves under a cron-like minimal PATH")
 
 
 def check_kit(report: Report) -> None:

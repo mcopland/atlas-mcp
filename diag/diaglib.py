@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import json
 import os
 import re
 import socket
@@ -38,6 +39,10 @@ CAUGHT: tuple[type[BaseException], ...] = (
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 MNT_C_USER_RE = re.compile(r"(/mnt/c/Users/)([^/\s]+)")
+# `kiro-cli whoami` prints the account's ARN and IAM Identity Center start URL, both of which
+# identify the tester's employer, not just their machine.
+AWS_ARN_RE = re.compile(r"(arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:)\d{12}:\S+")
+AWSAPPS_RE = re.compile(r"[A-Za-z0-9-]+\.awsapps\.com")
 
 # Env vars whose value is safe to print as-is (no secrets, no machine-identifying paths beyond
 # what scrub() already masks).
@@ -151,6 +156,13 @@ def scrub(text: str, atlas_mod: types.ModuleType | None = None) -> str:
     """Best-effort redaction before a report is printed: the tester pastes this into chat, so
     anything identifying (home dir, username, hostname, email) or secret-shaped has to be gone
     before it leaves their machine, not after."""
+    # EMAIL_RE runs before the username substitution below: if the username is also an email's
+    # local part (tester@corp.example.com), replacing the username first leaves "<user>@corp.
+    # example.com" behind, and the trailing company domain survives since '<' and '>' are not
+    # valid local-part characters for EMAIL_RE to still match.
+    text = EMAIL_RE.sub("<redacted-email>", text)
+    text = AWS_ARN_RE.sub(r"\1<account>:<redacted>", text)
+    text = AWSAPPS_RE.sub("<org>.awsapps.com", text)
     home = str(Path.home())
     if home and home != "/":
         text = text.replace(home, "~")
@@ -160,11 +172,26 @@ def scrub(text: str, atlas_mod: types.ModuleType | None = None) -> str:
     host = current_host()
     if host:
         text = re.sub(rf"\b{re.escape(host)}\b", "<host>", text)
-    text = EMAIL_RE.sub("<redacted-email>", text)
     text = MNT_C_USER_RE.sub(r"\1<user>", text)
     if atlas_mod is not None:
         text = atlas_mod.redact(text)
     return text
+
+
+def configured_kiro_bin(kit: Path) -> str:
+    """The kiro_bin a tester's config.json actually names, falling back to the bare command a
+    PATH lookup would use. Shared by check_kiro (which calls kiro-cli chat) and check_env (which
+    probes kiro-cli under a cron-like minimal PATH), so both agree with what atlas.py itself runs
+    rather than each guessing independently."""
+    config_path = kit / "config.json"
+    if config_path.is_file():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "kiro-cli"
+        if isinstance(cfg, dict):
+            return str(cfg.get("kiro_bin", "kiro-cli"))
+    return "kiro-cli"
 
 
 def env_summary() -> str:
@@ -248,8 +275,6 @@ def inspect_kiro_home(kiro_home: Path, kit: Path) -> dict[str, Any]:
         if not path.is_file():
             return None
         try:
-            import json
-
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
