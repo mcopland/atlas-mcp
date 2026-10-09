@@ -216,6 +216,7 @@ def _gen_args(**overrides):
         "dry_run": False,
         "no_build": False,
         "force_unlock": False,
+        "verbose": False,
     }
     args.update(overrides)
     return argparse.Namespace(**args)
@@ -319,6 +320,28 @@ def test_the_run_summary_counts_a_failed_repo_as_an_error(make_repo, make_cfg, m
     summary = next(l for l in capsys.readouterr().out.splitlines() if l.startswith("done:"))
     assert "full 1" in summary
     assert "1 errors" in summary
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_generate_lists_up_to_date_repos_only_when_verbose(
+    make_repo, make_cfg, monkeypatch, capsys, verbose
+):
+    """On a big estate nearly every repo is a skip, and one line each buries the repos that
+    did work. The summary still counts them."""
+    make_repo("steady")
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args())
+    make_repo("moved")
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        atlas.cmd_generate(cfg, _gen_args(verbose=verbose))
+    lines = capsys.readouterr().out.splitlines()
+    assert any(l.startswith("  moved: full") for l in lines)
+    assert any(l.startswith("  steady: skip") for l in lines) is verbose
+    summary = next(l for l in lines if l.startswith("done:"))
+    assert "skip 1" in summary
 
 
 def test_a_dry_run_summary_reports_no_prompt_bytes(make_repo, make_cfg, monkeypatch, capsys):

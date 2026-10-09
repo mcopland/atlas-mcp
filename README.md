@@ -73,7 +73,7 @@ uv run --script atlas.py generate --only a b c       # a representative mix
 
 Each run ends with a summary line: `done: 12 repos in 5m12s | full 4, update 6, restamp 1, skip 1 | 0 errors | 1.2 MB of prompts`. Kiro cannot report credits in headless mode, so that line plus `_meta.prompt_bytes` in each manifest is how you reconcile a run against the Kiro dashboard. Check credit usage in Kiro, then read `atlas/docs/*.md` and `atlas/graph.json`. This pilot is also how you judge whether the bundle is enough for your repos: if an entry is thin or its consumes are missing, rerun that repo with `explore_repos` set and compare `_meta.dropped_without_evidence` and the `unresolved` count between the two.
 
-`--limit N` caps how many repos a run touches, for a bigger pilot than `--only` without going all the way to a full run. `--no-build` skips rebuilding `graph.json` and the docs after mapping, useful when queuing several partial runs and only building once at the end.
+`--limit N` caps how many repos a run touches, for a bigger pilot than `--only` without going all the way to a full run. `--no-build` skips rebuilding `graph.json` and the docs after mapping, useful when queuing several partial runs and only building once at the end. Repos that are up to date are counted in the summary but not listed one by one; `-v` / `--verbose` lists them too.
 
 - `uv run --script atlas.py unresolved --top 25` groups every unmatched consume by target. This is the fastest way to see what the join is missing. Entries with `candidates=` were deliberately not linked because the match was weak and ambiguous.
 - Many `unresolved` consumes that are really internal: the provider repo is missing that name in `identifiers`. Rerun it with `--only NAME --full`.

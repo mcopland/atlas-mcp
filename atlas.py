@@ -2316,7 +2316,8 @@ def cmd_generate(cfg, args):
                     name, mode, msg, sent = fut.result()
                     counts[mode] = counts.get(mode, 0) + 1
                     prompt_bytes += sent
-                    print(f"  {name}: {mode} ({msg})")
+                    if mode != "skip" or args.verbose:
+                        print(f"  {name}: {mode} ({msg})")
                 # Per-repo boundary: one repo failing in an unforeseen way must not abort the
                 # run and skip the graph build for every other repo. The error is reported.
                 except Exception as e:  # noqa: BLE001
@@ -2449,6 +2450,9 @@ def main():
     g.add_argument("--pull", action="store_true", help="git pull --ff-only each repo first")
     g.add_argument("--dry-run", action="store_true", help="show what would run, spend nothing")
     g.add_argument("--no-build", action="store_true")
+    g.add_argument(
+        "-v", "--verbose", action="store_true", help="also list repos skipped as up to date"
+    )
     g.add_argument(
         "--force-unlock",
         action="store_true",
