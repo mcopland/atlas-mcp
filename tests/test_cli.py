@@ -509,6 +509,34 @@ def test_generate_rejects_a_non_positive_limit(
     assert "--limit" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (["--only", "a", "--only", "b"], {"a", "b"}),
+        (["--only", "a", "b"], {"a", "b"}),
+        (["--only", "a", "--only", "b", "c"], {"a", "b", "c"}),
+    ],
+)
+def test_generate_only_accepts_repeated_and_space_separated_names(
+    make_repo, make_cfg, monkeypatch, tmp_path, restore_umask, flags, expected
+):
+    """argparse's default store action keeps only the last --only, which silently mapped one
+    repo when several were asked for."""
+    for name in ("a", "b", "c", "d"):
+        make_repo(name)
+    cfg = make_cfg()
+    monkeypatch.setattr(atlas, "run_kiro", _stub_manifest)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["atlas.py", "--config", str(tmp_path / "config.json"), "generate", *flags],
+    )
+    with pytest.raises(SystemExit) as e:
+        atlas.main()
+    assert e.value.code == 0
+    mapped = {p.stem for p in (cfg["atlas_dir"] / "repos").glob("*.json")}
+    assert mapped == expected
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
 def test_main_keeps_the_atlas_private_to_its_owner(
     make_repo, make_cfg, monkeypatch, tmp_path, restore_umask

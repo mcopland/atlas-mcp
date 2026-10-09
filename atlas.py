@@ -2443,7 +2443,7 @@ def main():
     ap.add_argument("--config", default=str(KIT / "config.json"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate")
-    g.add_argument("--only", nargs="+")
+    g.add_argument("--only", nargs="+", action="extend")
     g.add_argument("--limit", type=positive_int)
     g.add_argument("--full", action="store_true", help="ignore existing manifests and regenerate")
     g.add_argument("--pull", action="store_true", help="git pull --ff-only each repo first")
