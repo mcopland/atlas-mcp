@@ -709,3 +709,26 @@ def test_a_repo_pinning_itself_by_url_makes_no_edge_and_no_unresolved_row(
     g = graph_of(cfg)
     assert g["edges"] == []
     assert g["unresolved"] == []
+
+
+@pytest.mark.parametrize(
+    "repo,dep", [("my_lib", "my-lib"), ("my.lib", "my-lib"), ("my-lib", "my_lib")]
+)
+def test_repo_name_alias_matches_across_pypi_name_normalisation(
+    make_cfg, make_manifest, graph_of, repo, dep
+):
+    cfg = make_cfg()
+    make_manifest(cfg, repo)
+    make_manifest(
+        cfg,
+        "app",
+        packages={
+            "publishes": [],
+            "depends_on": [
+                {"ecosystem": "pypi", "name": atlas.norm_pkg("pypi", dep), "evidence": "r.txt"}
+            ],
+        },
+    )
+    assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [
+        ("app", repo, "alias")
+    ]

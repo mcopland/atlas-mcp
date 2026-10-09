@@ -403,3 +403,58 @@ def test_an_inferred_dependency_on_a_published_package_is_dropped(tmp_path):
     )
     got = atlas.extract_packages(tmp_path)
     assert pypi(got, "depends_on") == {("pypi", "requests")}
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        "[metadata]\nname = real\n[options]\ninstall_requires = file: requirements.txt\n",
+        "[metadata]\nname = real\n[options.extras_require]\naws = file: extras.txt\n",
+    ],
+)
+def test_setup_cfg_file_directives_are_not_dependency_names(tmp_path, cfg):
+    write(tmp_path, {"setup.cfg": cfg})
+    assert pypi(atlas.extract_packages(tmp_path), "depends_on") == set()
+
+
+def test_setup_cfg_attr_and_file_names_are_not_published(tmp_path):
+    write(tmp_path, {"setup.cfg": "[metadata]\nname = attr: pkg.__name__\n"})
+    assert atlas.extract_packages(tmp_path)["publishes"] == []
+
+
+def test_setup_cfg_default_section_is_not_read_as_extras(tmp_path):
+    write(
+        tmp_path,
+        {"setup.cfg": "[DEFAULT]\nbogus = evilpkg\n[options.extras_require]\naws = s3fs\n"},
+    )
+    assert pypi(atlas.extract_packages(tmp_path), "depends_on") == {("pypi", "s3fs")}
+
+
+@pytest.mark.parametrize("other", ["helper.setup()", "logging_config.setup(level=1)", "setup()"])
+def test_setup_py_ignores_unrelated_setup_calls(tmp_path, other):
+    write(
+        tmp_path,
+        {"setup.py": f"import setuptools\n{other}\nsetuptools.setup(name='real')\n"},
+    )
+    assert pypi(atlas.extract_packages(tmp_path), "publishes") == {("pypi", "real")}
+
+
+def test_setup_py_warns_when_a_declared_field_is_not_a_literal(tmp_path, capsys):
+    write(tmp_path, {"setup.py": "setup(name=get_name(), install_requires=base + extra)\n"})
+    atlas.extract_packages(tmp_path)
+    err = capsys.readouterr().err
+    assert f"{tmp_path / 'setup.py'}" in err
+    assert "name" in err and "install_requires" in err
+
+
+def test_a_pathologically_nested_setup_py_warns_instead_of_aborting(tmp_path, capsys):
+    write(
+        tmp_path,
+        {
+            "setup.py": "x = " + "+".join(["1"] * 200000) + "\n",
+            "go.mod": "module github.com/org/ok\n",
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "publishes") == {("go", "github.com/org/ok")}
+    assert "could not parse" in capsys.readouterr().err

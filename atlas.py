@@ -542,11 +542,15 @@ def vcs_requirement(line):
     return (repo.group(1), True) if repo else ("", True)
 
 
+SETUP_MODULES = {"setuptools", "distutils.core"}
+SETUP_FIELDS = ("name", "install_requires", "extras_require")
+
+
 def setup_py_args(text):
-    """The literal keyword arguments of a setup.py's setup() call. The file is parsed, never
-    executed: a repo's setup.py is untrusted, and the atlas only needs the declared strings.
-    A module-level `NAME = "x"` used as `setup(name=NAME)` is followed; any other computed
-    argument is skipped, leaving the rest of the call readable."""
+    """(literal keyword arguments, names of the ones skipped) of a setup.py's setup() call. The
+    file is parsed, never executed: a repo's setup.py is untrusted, and the atlas only needs the
+    declared strings. A module-level `NAME = "x"` used as `setup(name=NAME)` is followed; any
+    other computed argument is reported as skipped, leaving the rest of the call readable."""
     tree = ast.parse(text)
     consts = {}
     for node in tree.body:
@@ -555,26 +559,40 @@ def setup_py_args(text):
             if isinstance(target, ast.Name):
                 with contextlib.suppress(ValueError, TypeError):
                     consts[target.id] = ast.literal_eval(node.value)
+    calls = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
-        if not (
-            (isinstance(fn, ast.Name) and fn.id == "setup")
-            or (isinstance(fn, ast.Attribute) and fn.attr == "setup")
+        # A bare setup() is whatever the file imported under that name; <module>.setup() is
+        # setuptools' only when the module is, so `logging_config.setup(...)` is not mistaken for it.
+        if (isinstance(fn, ast.Name) and fn.id == "setup") or (
+            isinstance(fn, ast.Attribute)
+            and fn.attr == "setup"
+            and ast.unparse(fn.value) in SETUP_MODULES
         ):
+            calls.append(node)
+    # A call without keywords declares nothing (setup.cfg may), so prefer one that does.
+    call = next((c for c in calls if c.keywords), None)
+    if call is None:
+        return {}, []
+    args, skipped = {}, []
+    for kw in call.keywords:
+        if kw.arg is None:
             continue
-        args = {}
-        for kw in node.keywords:
-            if kw.arg is None:
-                continue
-            if isinstance(kw.value, ast.Name) and kw.value.id in consts:
-                args[kw.arg] = consts[kw.value.id]
-                continue
-            with contextlib.suppress(ValueError, TypeError):
-                args[kw.arg] = ast.literal_eval(kw.value)
-        return args
-    return {}
+        if isinstance(kw.value, ast.Name) and kw.value.id in consts:
+            args[kw.arg] = consts[kw.value.id]
+            continue
+        try:
+            args[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, TypeError):
+            skipped.append(kw.arg)
+    return args, skipped
+
+
+# setup.cfg lets a value be read from elsewhere instead of written out; the text after the
+# directive names a file or attribute, not a package.
+CFG_DIRECTIVE = re.compile(r"^(?:file|attr)\s*:", re.IGNORECASE)
 
 
 def spec_lines(value):
@@ -585,7 +603,7 @@ def spec_lines(value):
     if not isinstance(value, (list, tuple)):
         return []
     lines = (v.strip() for v in value if isinstance(v, str))
-    return [v for v in lines if v and not v.startswith("#")]
+    return [v for v in lines if v and not v.startswith("#") and not CFG_DIRECTIVE.match(v)]
 
 
 def extract_packages(repo, files=None):
@@ -676,7 +694,13 @@ def extract_packages(repo, files=None):
                     for n in (group or {}).get("dependencies") or {}:
                         dep("pypi", n, f)
             elif f.name == "setup.py":
-                args = setup_py_args(text)
+                args, skipped = setup_py_args(text)
+                for field in SETUP_FIELDS:
+                    if field in skipped:
+                        print(
+                            f"warn: {f}: setup() {field} is not a literal, so it was not read",
+                            file=sys.stderr,
+                        )
                 name = args.get("name")
                 pub("pypi", name if isinstance(name, str) else None, f)
                 for spec in spec_lines(args.get("install_requires")):
@@ -686,9 +710,12 @@ def extract_packages(repo, files=None):
                     for spec in spec_lines(extra_deps):
                         pypi_spec(spec, f)
             elif f.name == "setup.cfg":
-                cfg = configparser.ConfigParser(interpolation=None)
+                # [DEFAULT] has no meaning to setuptools, but configparser would copy its keys
+                # into every section; renaming it makes it an ordinary, ignored section.
+                cfg = configparser.ConfigParser(interpolation=None, default_section="<none>")
                 cfg.read_string(text)
-                pub("pypi", cfg.get("metadata", "name", fallback=None), f)
+                cfg_name = cfg.get("metadata", "name", fallback="")
+                pub("pypi", None if CFG_DIRECTIVE.match(cfg_name) else cfg_name, f)
                 for spec in spec_lines(cfg.get("options", "install_requires", fallback="")):
                     pypi_spec(spec, f)
                 if cfg.has_section("options.extras_require"):
@@ -783,12 +810,14 @@ def extract_packages(repo, files=None):
                         if "$(" not in name:
                             dep("nuget", name, f)
         # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; SyntaxError (a
-        # setup.py) and configparser.Error (a setup.cfg) are not ValueErrors. The parsers also
+        # setup.py; RecursionError when one is nested past the parser's limit) and
+        # configparser.Error (a setup.cfg) are not ValueErrors. The parsers also
         # raise AttributeError/TypeError on structurally surprising but valid documents.
         except (
             OSError,
             ValueError,
             SyntaxError,
+            RecursionError,
             configparser.Error,
             ET.ParseError,
             AttributeError,
@@ -2142,6 +2171,7 @@ def build(cfg, known):
         # A repo's name is often what consumers write for the package it ships (py-sltc ships
         # sltc), but only a guess at it, so it never outranks a declared package name.
         provide("pkg", name, name, "alias")
+        provide("pkg", norm_pkg("pypi", name), name, "alias")  # dependencies are stored normalised
         for item in m.get("exposes") or []:
             fam = FAMILY.get(item.get("kind"), "other")
             key = str(item.get("key") or "")
