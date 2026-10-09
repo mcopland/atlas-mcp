@@ -23,7 +23,9 @@ Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
 """
 
 import argparse
+import ast
 import concurrent.futures as cf
+import configparser
 import contextlib
 import datetime as dt
 import fnmatch
@@ -516,21 +518,123 @@ def coord(group, artifact):
     return f"{group}:{artifact}".strip(":")
 
 
+# pip's `git+https://host/org/repo.git@ref#egg=name`, optionally behind -e. It has no leading
+# package name, so the generic requirement regex would read the scheme (`git`) as the package.
+VCS_REQ = re.compile(r"^\s*(?:(?:-e|--editable)[\s=]+)?(?:git|hg|svn|bzr)\+(\S+)")
+VCS_REPO = re.compile(r"/([^/@:]+?)(?:\.git)?(?:@[^#]*)?$")
+
+
+def vcs_requirement(line):
+    """(name, inferred) for a VCS requirement line, or None when the line is not one. `#egg=`
+    is the declared package name; without it the repo's basename is the best available guess,
+    which is why that name is flagged inferred."""
+    m = VCS_REQ.match(line)
+    if not m:
+        return None
+    url, _, fragment = m.group(1).partition("#")
+    for param in fragment.split("&"):
+        key, _, value = param.partition("=")
+        egg = re.match(r"[A-Za-z0-9_.\-]+", value)
+        if key == "egg" and egg:
+            return egg.group(0), False
+    path = re.sub(r"^[a-z][a-z0-9+.\-]*://[^/]*", "", url, flags=re.IGNORECASE)
+    repo = VCS_REPO.search(path)
+    return (repo.group(1), True) if repo else ("", True)
+
+
+SETUP_MODULES = {"setuptools", "distutils.core"}
+SETUP_FIELDS = ("name", "install_requires", "extras_require")
+
+
+def setup_py_args(text):
+    """(literal keyword arguments, names of the ones skipped) of a setup.py's setup() call. The
+    file is parsed, never executed: a repo's setup.py is untrusted, and the atlas only needs the
+    declared strings. A module-level `NAME = "x"` used as `setup(name=NAME)` is followed; any
+    other computed argument is reported as skipped, leaving the rest of the call readable."""
+    tree = ast.parse(text)
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                with contextlib.suppress(ValueError, TypeError):
+                    consts[target.id] = ast.literal_eval(node.value)
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # A bare setup() is whatever the file imported under that name; <module>.setup() is
+        # setuptools' only when the module is, so `logging_config.setup(...)` is not mistaken for it.
+        if (isinstance(fn, ast.Name) and fn.id == "setup") or (
+            isinstance(fn, ast.Attribute)
+            and fn.attr == "setup"
+            and ast.unparse(fn.value) in SETUP_MODULES
+        ):
+            calls.append(node)
+    # A call without keywords declares nothing (setup.cfg may), so prefer one that does.
+    call = next((c for c in calls if c.keywords), None)
+    if call is None:
+        return {}, []
+    args, skipped = {}, []
+    for kw in call.keywords:
+        if kw.arg is None:
+            continue
+        if isinstance(kw.value, ast.Name) and kw.value.id in consts:
+            args[kw.arg] = consts[kw.value.id]
+            continue
+        try:
+            args[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, TypeError):
+            skipped.append(kw.arg)
+    return args, skipped
+
+
+# setup.cfg lets a value be read from elsewhere instead of written out; the text after the
+# directive names a file or attribute, not a package.
+CFG_DIRECTIVE = re.compile(r"^(?:file|attr)\s*:", re.IGNORECASE)
+
+
+def spec_lines(value):
+    """Requirement specs from a setup() or setup.cfg value: setuptools takes either a list or
+    one newline-separated string."""
+    if isinstance(value, str):
+        value = value.splitlines()
+    if not isinstance(value, (list, tuple)):
+        return []
+    lines = (v.strip() for v in value if isinstance(v, str))
+    return [v for v in lines if v and not v.startswith("#") and not CFG_DIRECTIVE.match(v)]
+
+
 def extract_packages(repo, files=None):
-    publishes, depends = {}, {}
+    publishes, depends, inferred = {}, {}, set()
 
     def pub(eco, name, f):
         if name:
             publishes.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
 
-    def dep(eco, name, f):
-        if name:
-            depends.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
+    def dep(eco, name, f, guess=False):
+        if not name:
+            return
+        key = (eco, norm_pkg(eco, name))
+        if key in inferred and not guess:  # a declared name outranks a guessed one
+            inferred.discard(key)
+            del depends[key]
+        if key not in depends:
+            depends[key] = str(f.relative_to(repo))
+            if guess:
+                inferred.add(key)
+
+    def pypi_spec(spec, f):
+        m = re.match(r"[A-Za-z0-9_.\-]+", spec)
+        dep("pypi", m and m.group(0), f)
 
     wanted = {
         "package.json",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
         "requirements*.txt",
         "pom.xml",
         "build.gradle",
@@ -571,31 +675,59 @@ def extract_packages(repo, files=None):
                 project = data.get("project") or {}
                 poetry = (data.get("tool") or {}).get("poetry") or {}
                 pub("pypi", project.get("name") or poetry.get("name"), f)
-
-                def pypi_spec(spec, f=f):
-                    m = re.match(r"[A-Za-z0-9_.\-]+", spec)
-                    dep("pypi", m and m.group(0), f)
-
                 for spec in project.get("dependencies") or []:
-                    pypi_spec(spec)
+                    pypi_spec(spec, f)
                 for extra_deps in (project.get("optional-dependencies") or {}).values():
                     for spec in extra_deps or []:
-                        pypi_spec(spec)
+                        pypi_spec(spec, f)
                 # PEP 735: a group's own entries are strings; an {include-group: ...} reference
                 # to another group is a dict and names no package of its own, so it is skipped
                 # here and picked up when that other group is iterated in its own right.
                 for group_deps in (data.get("dependency-groups") or {}).values():
                     for entry in group_deps or []:
                         if isinstance(entry, str):
-                            pypi_spec(entry)
+                            pypi_spec(entry, f)
                 for n in poetry.get("dependencies") or {}:
                     if n.lower() != "python":
                         dep("pypi", n, f)
                 for group in (poetry.get("group") or {}).values():
                     for n in (group or {}).get("dependencies") or {}:
                         dep("pypi", n, f)
+            elif f.name == "setup.py":
+                args, skipped = setup_py_args(text)
+                for field in SETUP_FIELDS:
+                    if field in skipped:
+                        print(
+                            f"warn: {f}: setup() {field} is not a literal, so it was not read",
+                            file=sys.stderr,
+                        )
+                name = args.get("name")
+                pub("pypi", name if isinstance(name, str) else None, f)
+                for spec in spec_lines(args.get("install_requires")):
+                    pypi_spec(spec, f)
+                extras = args.get("extras_require")
+                for extra_deps in extras.values() if isinstance(extras, dict) else ():
+                    for spec in spec_lines(extra_deps):
+                        pypi_spec(spec, f)
+            elif f.name == "setup.cfg":
+                # [DEFAULT] has no meaning to setuptools, but configparser would copy its keys
+                # into every section; renaming it makes it an ordinary, ignored section.
+                cfg = configparser.ConfigParser(interpolation=None, default_section="<none>")
+                cfg.read_string(text)
+                cfg_name = cfg.get("metadata", "name", fallback="")
+                pub("pypi", None if CFG_DIRECTIVE.match(cfg_name) else cfg_name, f)
+                for spec in spec_lines(cfg.get("options", "install_requires", fallback="")):
+                    pypi_spec(spec, f)
+                if cfg.has_section("options.extras_require"):
+                    for extra_deps in cfg["options.extras_require"].values():
+                        for spec in spec_lines(extra_deps):
+                            pypi_spec(spec, f)
             elif f.name.startswith("requirements"):
                 for line in text.splitlines():
+                    vcs = vcs_requirement(line)
+                    if vcs:
+                        dep("pypi", vcs[0], f, guess=vcs[1])
+                        continue
                     m = re.match(r"\s*([A-Za-z0-9_.\-]+)", line)
                     if m and not line.strip().startswith(("#", "-")):
                         dep("pypi", m.group(1), f)
@@ -677,19 +809,38 @@ def extract_packages(repo, files=None):
                         name = node.get("Include") or node.get("Update") or ""
                         if "$(" not in name:
                             dep("nuget", name, f)
-        # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; the parsers
-        # also raise AttributeError/TypeError on structurally surprising but valid documents.
-        except (OSError, ValueError, ET.ParseError, AttributeError, TypeError) as e:
+        # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; SyntaxError (a
+        # setup.py; RecursionError when one is nested past the parser's limit) and
+        # configparser.Error (a setup.cfg) are not ValueErrors. The parsers also
+        # raise AttributeError/TypeError on structurally surprising but valid documents.
+        except (
+            OSError,
+            ValueError,
+            SyntaxError,
+            RecursionError,
+            configparser.Error,
+            ET.ParseError,
+            AttributeError,
+            TypeError,
+        ) as e:
             print(f"warn: could not parse {f}: {e}", file=sys.stderr)
 
     for key in list(depends):
         if key in publishes:  # internal to a monorepo
             del depends[key]
 
-    def to_list(d):
-        return [{"ecosystem": e, "name": n, "evidence": ev} for (e, n), ev in sorted(d.items())]
+    def to_list(d, guessed=()):
+        return [
+            {
+                "ecosystem": e,
+                "name": n,
+                "evidence": ev,
+                **({"inferred": True} if (e, n) in guessed else {}),
+            }
+            for (e, n), ev in sorted(d.items())
+        ]
 
-    return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
+    return {"publishes": to_list(publishes), "depends_on": to_list(depends, inferred)}
 
 
 # ---------- a yaml subset ----------
@@ -876,7 +1027,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 5
+FACTS_VERSION = 6
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -1176,6 +1327,8 @@ KEY_FILES = (
         "package.json",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
         "requirements*.txt",
         "pom.xml",
         "build.gradle",
@@ -2015,6 +2168,10 @@ def build(cfg, known):
             full, first = svc_forms(text)
             provide("svc", full, name, "exact")
             provide("svc", first, name, "alias")
+        # A repo's name is often what consumers write for the package it ships (py-sltc ships
+        # sltc), but only a guess at it, so it never outranks a declared package name.
+        provide("pkg", name, name, "alias")
+        provide("pkg", norm_pkg("pypi", name), name, "alias")  # dependencies are stored normalised
         for item in m.get("exposes") or []:
             fam = FAMILY.get(item.get("kind"), "other")
             key = str(item.get("key") or "")
@@ -2097,13 +2254,22 @@ def build(cfg, known):
             link(name, item, kind, key, lookups)
         for p in (m.get("packages") or {}).get("depends_on", []):
             eco_key, bare = f"{p['ecosystem']}:{p['name']}".lower(), p["name"].lower()
-            if ("pkg", eco_key) in index or ("pkg", bare) in index:  # only internal packages
+            owners = set(index.get(("pkg", eco_key), {})) | set(index.get(("pkg", bare), {}))
+            if owners - {name}:  # only internal packages, and not the repo's own
+                # A name taken from a VCS URL's basename is a guess, so it cannot match exactly.
+                inferred = p.get("inferred")
                 link(
                     name,
-                    {"name": p["name"], "evidence": p["evidence"], "detail": "declared dependency"},
+                    {
+                        "name": p["name"],
+                        "evidence": p["evidence"],
+                        "detail": "dependency named by a VCS URL"
+                        if inferred
+                        else "declared dependency",
+                    },
                     "package",
                     p["name"],
-                    [("pkg", eco_key, "exact"), ("pkg", bare, "alias")],
+                    [("pkg", eco_key, "alias" if inferred else "exact"), ("pkg", bare, "alias")],
                 )
 
     stores = {}

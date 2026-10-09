@@ -341,6 +341,8 @@ def test_key_files_appear_in_priority_order(make_repo):
         "catalog-info.yaml",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
         "pom.xml",
         "Dockerfile",
         "docker-compose.yml",
