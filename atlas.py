@@ -23,7 +23,9 @@ Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
 """
 
 import argparse
+import ast
 import concurrent.futures as cf
+import configparser
 import contextlib
 import datetime as dt
 import fnmatch
@@ -516,6 +518,52 @@ def coord(group, artifact):
     return f"{group}:{artifact}".strip(":")
 
 
+def setup_py_args(text):
+    """The literal keyword arguments of a setup.py's setup() call. The file is parsed, never
+    executed: a repo's setup.py is untrusted, and the atlas only needs the declared strings.
+    A module-level `NAME = "x"` used as `setup(name=NAME)` is followed; any other computed
+    argument is skipped, leaving the rest of the call readable."""
+    tree = ast.parse(text)
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                with contextlib.suppress(ValueError, TypeError):
+                    consts[target.id] = ast.literal_eval(node.value)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (
+            (isinstance(fn, ast.Name) and fn.id == "setup")
+            or (isinstance(fn, ast.Attribute) and fn.attr == "setup")
+        ):
+            continue
+        args = {}
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            if isinstance(kw.value, ast.Name) and kw.value.id in consts:
+                args[kw.arg] = consts[kw.value.id]
+                continue
+            with contextlib.suppress(ValueError, TypeError):
+                args[kw.arg] = ast.literal_eval(kw.value)
+        return args
+    return {}
+
+
+def spec_lines(value):
+    """Requirement specs from a setup() or setup.cfg value: setuptools takes either a list or
+    one newline-separated string."""
+    if isinstance(value, str):
+        value = value.splitlines()
+    if not isinstance(value, (list, tuple)):
+        return []
+    lines = (v.strip() for v in value if isinstance(v, str))
+    return [v for v in lines if v and not v.startswith("#")]
+
+
 def extract_packages(repo, files=None):
     publishes, depends = {}, {}
 
@@ -527,10 +575,16 @@ def extract_packages(repo, files=None):
         if name:
             depends.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
 
+    def pypi_spec(spec, f):
+        m = re.match(r"[A-Za-z0-9_.\-]+", spec)
+        dep("pypi", m and m.group(0), f)
+
     wanted = {
         "package.json",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
         "requirements*.txt",
         "pom.xml",
         "build.gradle",
@@ -571,29 +625,44 @@ def extract_packages(repo, files=None):
                 project = data.get("project") or {}
                 poetry = (data.get("tool") or {}).get("poetry") or {}
                 pub("pypi", project.get("name") or poetry.get("name"), f)
-
-                def pypi_spec(spec, f=f):
-                    m = re.match(r"[A-Za-z0-9_.\-]+", spec)
-                    dep("pypi", m and m.group(0), f)
-
                 for spec in project.get("dependencies") or []:
-                    pypi_spec(spec)
+                    pypi_spec(spec, f)
                 for extra_deps in (project.get("optional-dependencies") or {}).values():
                     for spec in extra_deps or []:
-                        pypi_spec(spec)
+                        pypi_spec(spec, f)
                 # PEP 735: a group's own entries are strings; an {include-group: ...} reference
                 # to another group is a dict and names no package of its own, so it is skipped
                 # here and picked up when that other group is iterated in its own right.
                 for group_deps in (data.get("dependency-groups") or {}).values():
                     for entry in group_deps or []:
                         if isinstance(entry, str):
-                            pypi_spec(entry)
+                            pypi_spec(entry, f)
                 for n in poetry.get("dependencies") or {}:
                     if n.lower() != "python":
                         dep("pypi", n, f)
                 for group in (poetry.get("group") or {}).values():
                     for n in (group or {}).get("dependencies") or {}:
                         dep("pypi", n, f)
+            elif f.name == "setup.py":
+                args = setup_py_args(text)
+                name = args.get("name")
+                pub("pypi", name if isinstance(name, str) else None, f)
+                for spec in spec_lines(args.get("install_requires")):
+                    pypi_spec(spec, f)
+                extras = args.get("extras_require")
+                for extra_deps in extras.values() if isinstance(extras, dict) else ():
+                    for spec in spec_lines(extra_deps):
+                        pypi_spec(spec, f)
+            elif f.name == "setup.cfg":
+                cfg = configparser.ConfigParser(interpolation=None)
+                cfg.read_string(text)
+                pub("pypi", cfg.get("metadata", "name", fallback=None), f)
+                for spec in spec_lines(cfg.get("options", "install_requires", fallback="")):
+                    pypi_spec(spec, f)
+                if cfg.has_section("options.extras_require"):
+                    for extra_deps in cfg["options.extras_require"].values():
+                        for spec in spec_lines(extra_deps):
+                            pypi_spec(spec, f)
             elif f.name.startswith("requirements"):
                 for line in text.splitlines():
                     m = re.match(r"\s*([A-Za-z0-9_.\-]+)", line)
@@ -677,9 +746,18 @@ def extract_packages(repo, files=None):
                         name = node.get("Include") or node.get("Update") or ""
                         if "$(" not in name:
                             dep("nuget", name, f)
-        # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; the parsers
-        # also raise AttributeError/TypeError on structurally surprising but valid documents.
-        except (OSError, ValueError, ET.ParseError, AttributeError, TypeError) as e:
+        # ValueError covers json.JSONDecodeError and tomllib.TOMLDecodeError; SyntaxError (a
+        # setup.py) and configparser.Error (a setup.cfg) are not ValueErrors. The parsers also
+        # raise AttributeError/TypeError on structurally surprising but valid documents.
+        except (
+            OSError,
+            ValueError,
+            SyntaxError,
+            configparser.Error,
+            ET.ParseError,
+            AttributeError,
+            TypeError,
+        ) as e:
             print(f"warn: could not parse {f}: {e}", file=sys.stderr)
 
     for key in list(depends):
@@ -876,7 +954,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 5
+FACTS_VERSION = 6
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -1176,6 +1254,8 @@ KEY_FILES = (
         "package.json",
         "go.mod",
         "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
         "requirements*.txt",
         "pom.xml",
         "build.gradle",

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import atlas
 
 
@@ -264,3 +266,96 @@ def test_maven_child_module_inherits_the_parent_group(tmp_path):
     assert {(p["ecosystem"], p["name"]) for p in got["publishes"]} == {
         ("maven", "com.org:orders-api")
     }
+
+
+def pypi(got, key):
+    return {(p["ecosystem"], p["name"]) for p in got[key]}
+
+
+def test_setup_py_publishes_its_name_and_reads_dependencies(tmp_path):
+    write(
+        tmp_path,
+        {
+            "setup.py": (
+                "from setuptools import setup\n"
+                "setup(name='sltc', install_requires=['requests>=2'],\n"
+                "      extras_require={'aws': ['boto3'], 'dev': ['pytest']})\n"
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "publishes") == {("pypi", "sltc")}
+    assert pypi(got, "depends_on") == {
+        ("pypi", "requests"),
+        ("pypi", "boto3"),
+        ("pypi", "pytest"),
+    }
+    assert got["publishes"][0]["evidence"] == "setup.py"
+
+
+@pytest.mark.parametrize("call", ["setup", "setuptools.setup"])
+def test_setup_py_resolves_module_level_constants(tmp_path, call):
+    write(
+        tmp_path,
+        {
+            "setup.py": (
+                "import setuptools\nfrom setuptools import setup\n"
+                f"NAME = 'Sltc_Core'\nREQUIRES = ['requests']\n"
+                f"{call}(name=NAME, install_requires=REQUIRES)\n"
+            )
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "publishes") == {("pypi", "sltc-core")}
+    assert pypi(got, "depends_on") == {("pypi", "requests")}
+
+
+def test_setup_py_skips_a_non_literal_kwarg_but_keeps_the_rest(tmp_path):
+    write(tmp_path, {"setup.py": "setup(name=get_name(), install_requires=['requests'])\n"})
+    got = atlas.extract_packages(tmp_path)
+    assert got["publishes"] == []
+    assert pypi(got, "depends_on") == {("pypi", "requests")}
+
+
+def test_setup_py_is_parsed_and_never_executed(tmp_path):
+    marker = tmp_path / "ran"
+    write(tmp_path, {"setup.py": f"open({str(marker)!r}, 'w').close()\nsetup(name='sltc')\n"})
+    assert pypi(atlas.extract_packages(tmp_path), "publishes") == {("pypi", "sltc")}
+    assert not marker.exists()
+
+
+def test_setup_cfg_publishes_and_reads_multiline_dependencies(tmp_path):
+    write(
+        tmp_path,
+        {
+            "setup.py": "from setuptools import setup\nsetup()\n",
+            "setup.cfg": (
+                "[metadata]\nname = sltc\n\n"
+                "[options]\ninstall_requires =\n    requests>=2\n    # a comment\n\n    boto3\n\n"
+                "[options.extras_require]\naws =\n    s3fs\n"
+            ),
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "publishes") == {("pypi", "sltc")}
+    assert pypi(got, "depends_on") == {("pypi", "requests"), ("pypi", "boto3"), ("pypi", "s3fs")}
+
+
+@pytest.mark.parametrize(
+    "rel,text",
+    [("setup.py", "setup(name='broken'\n"), ("setup.cfg", "[metadata\nname = broken\n")],
+)
+def test_a_malformed_legacy_manifest_warns_and_the_rest_still_extract(tmp_path, capsys, rel, text):
+    write(tmp_path, {rel: text, "go.mod": "module github.com/org/ok\n"})
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "publishes") == {("go", "github.com/org/ok")}
+    assert f"could not parse {tmp_path / rel}" in capsys.readouterr().err
+
+
+def test_a_package_the_repo_publishes_is_not_listed_as_its_dependency(tmp_path):
+    write(
+        tmp_path,
+        {"setup.py": "setup(name='sltc')\n", "requirements.txt": "sltc==1.0\nrequests\n"},
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "depends_on") == {("pypi", "requests")}
