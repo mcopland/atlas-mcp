@@ -2015,6 +2015,9 @@ def build(cfg, known):
             full, first = svc_forms(text)
             provide("svc", full, name, "exact")
             provide("svc", first, name, "alias")
+        # A repo's name is often what consumers write for the package it ships (py-sltc ships
+        # sltc), but only a guess at it, so it never outranks a declared package name.
+        provide("pkg", name, name, "alias")
         for item in m.get("exposes") or []:
             fam = FAMILY.get(item.get("kind"), "other")
             key = str(item.get("key") or "")
