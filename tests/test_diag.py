@@ -186,6 +186,18 @@ def test_build_argparser_accepts_known_section():
     assert args.only == ["system"]
 
 
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--only", "system", "--only", "python"],
+        ["--only", "system", "python"],
+    ],
+)
+def test_build_argparser_accumulates_only_sections(flags):
+    parser = diaglib.build_argparser("check_env", ["system", "python", "paths"])
+    assert parser.parse_args(flags).only == ["system", "python"]
+
+
 def test_build_argparser_live_flag_only_when_requested():
     parser = diaglib.build_argparser("check_kiro", ["install"], live=True)
     args = parser.parse_args(["--live"])

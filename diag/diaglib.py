@@ -443,6 +443,7 @@ def build_argparser(
     parser.add_argument(
         "--only",
         nargs="+",
+        action="extend",
         choices=list(sections),
         help=f"run only these sections: {', '.join(sections)}",
     )
