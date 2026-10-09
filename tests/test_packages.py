@@ -359,3 +359,47 @@ def test_a_package_the_repo_publishes_is_not_listed_as_its_dependency(tmp_path):
     )
     got = atlas.extract_packages(tmp_path)
     assert pypi(got, "depends_on") == {("pypi", "requests")}
+
+
+def requirements(tmp_path, *lines):
+    write(tmp_path, {"requirements.txt": "\n".join(lines) + "\n"})
+    return atlas.extract_packages(tmp_path)["depends_on"]
+
+
+@pytest.mark.parametrize(
+    "line,name,inferred",
+    [
+        ("git+https://h/org/py-sltc.git@v1#egg=sltc", "sltc", False),
+        ("-e git+ssh://git@h/org/py-sltc.git#egg=sltc", "sltc", False),
+        ("git+https://h/org/py-sltc.git#subdirectory=x&egg=sltc[aws]", "sltc", False),
+        ("sltc @ git+https://h/org/py-sltc.git", "sltc", False),
+        ("git+https://h/org/py-sltc.git@v1.2", "py-sltc", True),
+        ("git+https://h/org/py-sltc.git@feature/x", "py-sltc", True),
+        ("-e git+ssh://git@h/org/py-sltc.git", "py-sltc", True),
+        ("git+https://h/org/py-sltc", "py-sltc", True),
+    ],
+)
+def test_vcs_requirement_names_the_package_not_git(tmp_path, line, name, inferred):
+    got = requirements(tmp_path, line)
+    assert [(d["name"], d.get("inferred", False)) for d in got] == [(name, inferred)]
+
+
+def test_a_declared_dependency_replaces_an_inferred_one_in_either_order(tmp_path):
+    for lines in (
+        ["git+https://h/org/sltc.git", "sltc==1.0"],
+        ["sltc==1.0", "git+https://h/org/sltc.git"],
+    ):
+        got = requirements(tmp_path, *lines)
+        assert [(d["name"], d.get("inferred", False)) for d in got] == [("sltc", False)]
+
+
+def test_an_inferred_dependency_on_a_published_package_is_dropped(tmp_path):
+    write(
+        tmp_path,
+        {
+            "setup.py": "setup(name='sltc')\n",
+            "requirements.txt": "git+https://h/org/sltc.git\nrequests\n",
+        },
+    )
+    got = atlas.extract_packages(tmp_path)
+    assert pypi(got, "depends_on") == {("pypi", "requests")}

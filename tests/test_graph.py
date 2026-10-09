@@ -634,3 +634,78 @@ def test_a_package_consume_on_the_repos_own_name_makes_no_self_edge(
         consumes=[{"kind": "package", "name": "sltc", "key": "py-sltc", "evidence": ev()}],
     )
     assert graph_of(cfg)["edges"] == []
+
+
+def test_an_inferred_package_dependency_never_links_above_alias(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(
+        cfg,
+        "lib",
+        packages={
+            "publishes": [{"ecosystem": "pypi", "name": "py-sltc", "evidence": "setup.py"}],
+            "depends_on": [],
+        },
+    )
+    make_manifest(
+        cfg,
+        "app",
+        packages={
+            "publishes": [],
+            "depends_on": [
+                {
+                    "ecosystem": "pypi",
+                    "name": "py-sltc",
+                    "evidence": "requirements.txt",
+                    "inferred": True,
+                }
+            ],
+        },
+    )
+    assert [(e["from"], e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [
+        ("app", "lib", "alias")
+    ]
+
+
+def test_a_declared_package_dependency_still_links_exact(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(
+        cfg,
+        "lib",
+        packages={
+            "publishes": [{"ecosystem": "pypi", "name": "sltc", "evidence": "setup.py"}],
+            "depends_on": [],
+        },
+    )
+    make_manifest(
+        cfg,
+        "app",
+        packages={
+            "publishes": [],
+            "depends_on": [{"ecosystem": "pypi", "name": "sltc", "evidence": "requirements.txt"}],
+        },
+    )
+    assert [e["match"] for e in graph_of(cfg)["edges"]] == ["exact"]
+
+
+def test_a_repo_pinning_itself_by_url_makes_no_edge_and_no_unresolved_row(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    make_manifest(
+        cfg,
+        "py-sltc",
+        packages={
+            "publishes": [{"ecosystem": "pypi", "name": "sltc", "evidence": "setup.py"}],
+            "depends_on": [
+                {
+                    "ecosystem": "pypi",
+                    "name": "py-sltc",
+                    "evidence": "requirements.txt",
+                    "inferred": True,
+                }
+            ],
+        },
+    )
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert g["unresolved"] == []

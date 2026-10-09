@@ -518,6 +518,30 @@ def coord(group, artifact):
     return f"{group}:{artifact}".strip(":")
 
 
+# pip's `git+https://host/org/repo.git@ref#egg=name`, optionally behind -e. It has no leading
+# package name, so the generic requirement regex would read the scheme (`git`) as the package.
+VCS_REQ = re.compile(r"^\s*(?:(?:-e|--editable)[\s=]+)?(?:git|hg|svn|bzr)\+(\S+)")
+VCS_REPO = re.compile(r"/([^/@:]+?)(?:\.git)?(?:@[^#]*)?$")
+
+
+def vcs_requirement(line):
+    """(name, inferred) for a VCS requirement line, or None when the line is not one. `#egg=`
+    is the declared package name; without it the repo's basename is the best available guess,
+    which is why that name is flagged inferred."""
+    m = VCS_REQ.match(line)
+    if not m:
+        return None
+    url, _, fragment = m.group(1).partition("#")
+    for param in fragment.split("&"):
+        key, _, value = param.partition("=")
+        egg = re.match(r"[A-Za-z0-9_.\-]+", value)
+        if key == "egg" and egg:
+            return egg.group(0), False
+    path = re.sub(r"^[a-z][a-z0-9+.\-]*://[^/]*", "", url, flags=re.IGNORECASE)
+    repo = VCS_REPO.search(path)
+    return (repo.group(1), True) if repo else ("", True)
+
+
 def setup_py_args(text):
     """The literal keyword arguments of a setup.py's setup() call. The file is parsed, never
     executed: a repo's setup.py is untrusted, and the atlas only needs the declared strings.
@@ -565,15 +589,23 @@ def spec_lines(value):
 
 
 def extract_packages(repo, files=None):
-    publishes, depends = {}, {}
+    publishes, depends, inferred = {}, {}, set()
 
     def pub(eco, name, f):
         if name:
             publishes.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
 
-    def dep(eco, name, f):
-        if name:
-            depends.setdefault((eco, norm_pkg(eco, name)), str(f.relative_to(repo)))
+    def dep(eco, name, f, guess=False):
+        if not name:
+            return
+        key = (eco, norm_pkg(eco, name))
+        if key in inferred and not guess:  # a declared name outranks a guessed one
+            inferred.discard(key)
+            del depends[key]
+        if key not in depends:
+            depends[key] = str(f.relative_to(repo))
+            if guess:
+                inferred.add(key)
 
     def pypi_spec(spec, f):
         m = re.match(r"[A-Za-z0-9_.\-]+", spec)
@@ -665,6 +697,10 @@ def extract_packages(repo, files=None):
                             pypi_spec(spec, f)
             elif f.name.startswith("requirements"):
                 for line in text.splitlines():
+                    vcs = vcs_requirement(line)
+                    if vcs:
+                        dep("pypi", vcs[0], f, guess=vcs[1])
+                        continue
                     m = re.match(r"\s*([A-Za-z0-9_.\-]+)", line)
                     if m and not line.strip().startswith(("#", "-")):
                         dep("pypi", m.group(1), f)
@@ -764,10 +800,18 @@ def extract_packages(repo, files=None):
         if key in publishes:  # internal to a monorepo
             del depends[key]
 
-    def to_list(d):
-        return [{"ecosystem": e, "name": n, "evidence": ev} for (e, n), ev in sorted(d.items())]
+    def to_list(d, guessed=()):
+        return [
+            {
+                "ecosystem": e,
+                "name": n,
+                "evidence": ev,
+                **({"inferred": True} if (e, n) in guessed else {}),
+            }
+            for (e, n), ev in sorted(d.items())
+        ]
 
-    return {"publishes": to_list(publishes), "depends_on": to_list(depends)}
+    return {"publishes": to_list(publishes), "depends_on": to_list(depends, inferred)}
 
 
 # ---------- a yaml subset ----------
@@ -2180,13 +2224,22 @@ def build(cfg, known):
             link(name, item, kind, key, lookups)
         for p in (m.get("packages") or {}).get("depends_on", []):
             eco_key, bare = f"{p['ecosystem']}:{p['name']}".lower(), p["name"].lower()
-            if ("pkg", eco_key) in index or ("pkg", bare) in index:  # only internal packages
+            owners = set(index.get(("pkg", eco_key), {})) | set(index.get(("pkg", bare), {}))
+            if owners - {name}:  # only internal packages, and not the repo's own
+                # A name taken from a VCS URL's basename is a guess, so it cannot match exactly.
+                inferred = p.get("inferred")
                 link(
                     name,
-                    {"name": p["name"], "evidence": p["evidence"], "detail": "declared dependency"},
+                    {
+                        "name": p["name"],
+                        "evidence": p["evidence"],
+                        "detail": "dependency named by a VCS URL"
+                        if inferred
+                        else "declared dependency",
+                    },
                     "package",
                     p["name"],
-                    [("pkg", eco_key, "exact"), ("pkg", bare, "alias")],
+                    [("pkg", eco_key, "alias" if inferred else "exact"), ("pkg", bare, "alias")],
                 )
 
     stores = {}
