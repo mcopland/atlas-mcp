@@ -300,6 +300,31 @@ def test_inspect_kiro_home_hides_other_server_envs(tmp_path):
     assert "other" in rendered  # named, just not detailed
 
 
+def test_inspect_kiro_home_lists_skills_and_leftover_steering(tmp_path):
+    kiro_home = tmp_path / ".kiro"
+    (kiro_home / "skills" / "atlas").mkdir(parents=True)
+    (kiro_home / "steering").mkdir(parents=True)
+    (kiro_home / "steering" / "atlas.md").write_text("old")
+    result = diaglib.inspect_kiro_home(kiro_home, KIT)
+    assert result["files"]["skills"] == ["atlas"]
+    assert result["files"]["steering"] == ["atlas.md"]
+
+
+def test_inspect_kiro_home_warns_on_leftover_steering_file(tmp_path):
+    kiro_home = tmp_path / ".kiro"
+    (kiro_home / "steering").mkdir(parents=True)
+    (kiro_home / "steering" / "atlas.md").write_text("old")
+    result = diaglib.inspect_kiro_home(kiro_home, KIT)
+    assert any("steering/atlas.md" in w for w in result["warnings"])
+
+
+def test_inspect_kiro_home_does_not_warn_without_leftover_steering(tmp_path):
+    kiro_home = tmp_path / ".kiro"
+    (kiro_home / "skills" / "atlas").mkdir(parents=True)
+    result = diaglib.inspect_kiro_home(kiro_home, KIT)
+    assert not any("steering" in w for w in result["warnings"])
+
+
 def test_inspect_kiro_home_warns_on_double_registration(tmp_path):
     kiro_home = tmp_path / ".kiro"
     (kiro_home / "settings").mkdir(parents=True)

@@ -6,7 +6,7 @@ Maps every repo with headless Kiro (Haiku), joins the results into one dependenc
 atlas-mcp/   this kit (code, prompts, config)
 atlas-src/   dedicated clones of every repo, default branch only (recommended)
 atlas/       generated output: repos/*.json, graph.json, docs/, index.md, logs/
-~/.kiro/     global steering, MCP registration, permissions
+~/.kiro/     global skills, MCP registration, permissions
 ```
 
 ## 1. Prerequisites
@@ -83,15 +83,15 @@ Then run everything: `uv run --script atlas.py generate`.
 
 ## 5. Connect Kiro
 
-Copy `kiro/steering/atlas.md` to `~/.kiro/steering/atlas.md`, then pick one of the two registrations below. Do not do both: each one registers a server named `atlas`.
+Copy `kiro/skills/atlas/` to `~/.kiro/skills/atlas/`. If you installed an earlier version, delete `~/.kiro/steering/atlas.md`: left in place, it loads the rules a second time on every session. Then pick one of the two registrations below. Do not do both: each one registers a server named `atlas`.
 
-**An agent (recommended).** Copy `kiro/agents/atlas.json` to `~/.kiro/agents/atlas.json` and edit the absolute paths. It declares the atlas server, pre-approves its tools, and lists the steering file in `resources` (the relative path resolves from the agent file, so keep the file in `~/.kiro/agents/`). Use it with `kiro-cli chat --agent atlas`.
+**An agent (recommended).** Copy `kiro/agents/atlas.json` to `~/.kiro/agents/atlas.json` and edit the absolute paths. It declares the atlas server, pre-approves its tools, and lists the atlas skill in `resources` (the relative path resolves from the agent file, so keep the file in `~/.kiro/agents/`). Use it with `kiro-cli chat --agent atlas`.
 
-**The global MCP file.** Merge `kiro/mcp.json` into `~/.kiro/settings/mcp.json` using absolute paths, because Kiro does not inherit your shell PATH. Optionally merge `kiro/permissions.yaml` into `~/.kiro/settings/permissions.yaml` (edit paths) to stop the atlas tools prompting on each call.
+**The global MCP file.** Without the agent, the atlas skill reaches a session only if Kiro includes `~/.kiro/skills/` among its default resources, which I have not confirmed: check with a pilot run. Merge `kiro/mcp.json` into `~/.kiro/settings/mcp.json` using absolute paths, because Kiro does not inherit your shell PATH. Optionally merge `kiro/permissions.yaml` into `~/.kiro/settings/permissions.yaml` (edit paths) to stop the atlas tools prompting on each call.
 
 Either way, start a new `kiro-cli` session, run `/mcp` to confirm `atlas` is connected, then ask something like "what depends on payments-service?"
 
-The agent is the recommended path because a steering file in `~/.kiro/steering/` is not injected when the workspace has its own `.kiro/steering/`, which is the normal case in an org repo ([kirodotdev/Kiro#8121](https://github.com/kirodotdev/Kiro/issues/8121), [aws/amazon-q-developer-cli#3719](https://github.com/aws/amazon-q-developer-cli/issues/3719)). An agent that lists the file as a resource loads it either way.
+The agent is the recommended path because a steering file in `~/.kiro/steering/` is not injected when the workspace has its own `.kiro/steering/`, which is the normal case in an org repo ([kirodotdev/Kiro#8121](https://github.com/kirodotdev/Kiro/issues/8121), [aws/amazon-q-developer-cli#3719](https://github.com/aws/amazon-q-developer-cli/issues/3719)). An agent that lists the skill as a resource loads it either way, and only the skill's name and description enter context at startup; the rules load when the task calls for them.
 
 ## 6. Keep it current
 

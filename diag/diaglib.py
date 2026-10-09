@@ -267,7 +267,7 @@ def inspect_kiro_home(kiro_home: Path, kit: Path) -> dict[str, Any]:
     two registration mistakes the README explicitly warns about: registering `atlas` twice, and
     a relative `command` (Kiro does not inherit the shell PATH)."""
     result: dict[str, Any] = {"files": {}, "atlas_servers": {}, "other_servers": [], "warnings": []}
-    for sub in ("agents", "settings", "steering"):
+    for sub in ("agents", "settings", "skills", "steering"):
         d = kiro_home / sub
         result["files"][sub] = sorted(p.name for p in d.iterdir()) if d.is_dir() else []
 
@@ -300,6 +300,11 @@ def inspect_kiro_home(kiro_home: Path, kit: Path) -> dict[str, Any]:
         result["warnings"].append(
             "atlas is registered in both agents/atlas.json and settings/mcp.json; "
             "the README says to use only one"
+        )
+    if "atlas.md" in result["files"]["steering"]:
+        result["warnings"].append(
+            "steering/atlas.md is installed alongside the atlas skill; "
+            "the README says to delete it, or the rules load twice"
         )
     for label, entry in result["atlas_servers"].items():
         command = entry.get("command") or ""

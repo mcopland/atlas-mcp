@@ -11,5 +11,5 @@
       "env": { "ATLAS_DIR": "/ABSOLUTE/PATH/TO/atlas" }
     }
   },
-  "resources": ["file://../steering/atlas.md"]
+  "resources": ["skill://../skills/atlas/SKILL.md"]
 }

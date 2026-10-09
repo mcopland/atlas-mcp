@@ -1,5 +1,6 @@
 ---
-inclusion: always
+name: atlas
+description: Rules for the org atlas MCP tools (list_repos, search, get_repo, dependents, dependencies, find_path, impact, get_doc, freshness). Load before calling any atlas tool, and for questions about other repos, what depends on a service, or the impact of changing an interface (API, event, schema, shared package).
 ---
 
 # Org atlas
