@@ -2225,15 +2225,22 @@ PLACEHOLDER_HOSTS = (
     "localhost", "example.com", "example.org", "example.net", "w3.org", "json-schema.org",
     "schema.org",
 )  # fmt: skip
+WEB_KINDS = {"http", "graphql", "websocket"}
 INTERNAL_TLDS = {"local", "internal", "svc", "localhost", "lan", "localdomain"}
 HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
 
 
-def external_host(key, internal_domains):
+def external_host(key, internal_domains, kind=""):
     """The host of a consume that is evidence of a third party, else "". Only a fully qualified
     name outside every internal domain counts: an env-var name or bare word names no host, and
-    with no internal_domains configured nothing can be called outside."""
-    if not internal_domains or ENV_NAME.fullmatch(str(key).strip()):
+    with no internal_domains configured nothing can be called outside. A dotted name is only
+    taken for a host when it says so: a URL, or a lowercase name on a web protocol. A gRPC
+    service (`billing.v1.BillingService`) or an assembly-style name (`Acme.Orm.Billing`) is
+    dotted too, and calling it a third party would hide the internal repo that owns it."""
+    text = str(key).strip()
+    if not internal_domains or ENV_NAME.fullmatch(text) or kind == "grpc":
+        return ""
+    if "://" not in text and (kind not in WEB_KINDS or text != text.lower()):
         return ""
     host = svc_forms(key)[0]
     if not HOST_NAME.fullmatch(host):
@@ -2328,6 +2335,9 @@ def load_overrides(path):
     if doc.get("version", 1) != 1:
         return bad(f"unsupported version {doc['version']!r}")
     out = {"externals": {}, "groups": {}, "targets": {}}
+    for section in ("externals", "groups"):
+        if doc.get(section) is not None and not isinstance(doc[section], dict):
+            bad(f"{section!r} must be an object")
     for eid, d in (doc.get("externals") or {}).items():
         d = d if isinstance(d, dict) else bad(f"externals[{eid!r}] must be an object")
         hosts = d.get("hosts", [])
@@ -2522,7 +2532,7 @@ def build(cfg, known):
             buckets["generic"] += 1
 
     def link(src, item, kind, key, lookups):
-        slot = (key.lower(), src)
+        slot = (key.strip().lower(), src)
         if slot in answers:  # a human answer outranks every rule
             answered.add(slot)
             apply_answer(src, item, kind, key, answers[slot])
@@ -2542,7 +2552,7 @@ def build(cfg, known):
         # Only a target nothing internal even partly matched: a shortlist of weak candidates means
         # the name may well be ours, and guessing "third party" there would hide a real edge.
         host = (
-            external_host(key, cfg["internal_domains"])
+            external_host(key, cfg["internal_domains"], kind)
             if not hits and FAMILY.get(kind, "other") in ("svc", "other")
             else ""
         )
@@ -2683,6 +2693,12 @@ def mid(s):
     return "n_" + re.sub(r"\W", "_", str(s))
 
 
+def ext_mid(ext_id):
+    """A repo id always starts n_, so a prefix of its own keeps a third party from sharing a box
+    with a repo whose name happens to read x-<id>."""
+    return "e_" + re.sub(r"\W", "_", str(ext_id))
+
+
 def mtext(s):
     return re.sub(r"[\"'`|<>\[\]{}()#;]", " ", str(s)).strip()[:60] or "-"
 
@@ -2702,9 +2718,9 @@ def outbound_doc(graph):
         pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
     lines += ["```mermaid", "flowchart LR"]
     lines += [f'  {mid(n)}["{mtext(n)}"]' for n in sorted({a for a, _ in pairs})]
-    lines += [f'  {mid("x_" + x)}(["{mtext(nodes[x]["label"])}"])' for x in sorted(nodes)]
+    lines += [f'  {ext_mid(x)}(["{mtext(nodes[x]["label"])}"])' for x in sorted(nodes)]
     lines += [
-        f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid('x_' + x)}"
+        f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {ext_mid(x)}"
         for (a, x), k in sorted(pairs.items())
     ]
     lines += ["```", ""]
@@ -2834,7 +2850,7 @@ def render_docs(ad, manifests, graph):
             for n in sorted(outsiders)
         ]
         lines += [
-            f'  {mid("x_" + x)}(["{mtext(graph["external_nodes"][x]["label"])}"])'
+            f'  {ext_mid(x)}(["{mtext(graph["external_nodes"][x]["label"])}"])'
             for x in sorted({x for _, x in ext_pairs})
         ]
         lines += [
@@ -2842,7 +2858,7 @@ def render_docs(ad, manifests, graph):
             for (a, b), k in sorted(pairs.items())
         ]
         lines += [
-            f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid('x_' + x)}"
+            f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {ext_mid(x)}"
             for (a, x), k in sorted(ext_pairs.items())
         ]
         lines += ["```", ""] + [f"- {n}: {graph['repos'][n]['summary']}" for n in sorted(members)]
@@ -3023,8 +3039,8 @@ def cmd_resolve(cfg, args, ask=input, say=print):
     targets = {}
     for u in graph["unresolved"]:
         t = targets.setdefault(
-            u["key"].lower(),
-            {"key": u["key"], "kinds": set(), "consumers": {}, "candidates": set()},
+            u["key"].strip().lower(),
+            {"key": u["key"].strip(), "kinds": set(), "consumers": {}, "candidates": set()},
         )
         t["kinds"].add(u.get("kind", ""))
         t["consumers"].setdefault(u["repo"], u)
@@ -3046,7 +3062,11 @@ def cmd_resolve(cfg, args, ask=input, say=print):
     def read_doc():
         if not path.exists():
             return {"version": 1}
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:  # edited or truncated since the build read it
+            sys.exit(f"cannot read {path}: {e}; answers saved before this point are in it")
+        return doc if isinstance(doc, dict) else sys.exit(f"{path} is not a JSON object")
 
     def save(entries, defs):
         doc = read_doc()
@@ -3080,8 +3100,8 @@ def cmd_resolve(cfg, args, ask=input, say=print):
             elif not (name := repo_names.get(text.lower())):
                 say(f"  no repo named {text!r}")
                 continue
-            if name in consumers:
-                say(f"  {name} is itself a consumer of this target")
+            if set(consumers) <= {name}:
+                say(f"  {name} is the only consumer here and cannot depend on itself")
                 continue
             return name
 
@@ -3100,7 +3120,9 @@ def cmd_resolve(cfg, args, ask=input, say=print):
             if choice == "l":
                 if to := ask_repo(consumers, candidates):
                     return [
-                        {"key": key, "repo": r, "action": "link", "to": to} for r in consumers
+                        {"key": key, "repo": r, "action": "link", "to": to}
+                        for r in consumers
+                        if r != to  # the owner itself keeps the target; the rest depend on it
                     ], {}
             elif choice == "e":
                 doc = read_doc()
@@ -3118,7 +3140,12 @@ def cmd_resolve(cfg, args, ask=input, say=print):
                 ], defs
             elif choice == "g":
                 tag = ask_name("tag (the kind of store, e.g. mongo)").lower()
-                group = ask_name("shared group id (blank = each consumer stays separate)", True)
+                while True:
+                    group = ask_name("shared group id (blank = each consumer stays separate)", True)
+                    taken = read_doc().get("groups", {}).get(group, {}).get("tag")
+                    if not (group and taken and taken != tag):
+                        break
+                    say(f"  group {group!r} is tagged {taken!r}, not {tag!r}; pick another group")
                 defs = {}
                 if group and group not in read_doc().get("groups", {}):
                     label = prompt("  label for the group (blank = the id) > ") or group
@@ -3164,7 +3191,7 @@ def cmd_resolve(cfg, args, ask=input, say=print):
                         answered += 1
             elif outcome:
                 save(*outcome)
-                answered += len(consumers)
+                answered += len(outcome[0])
     except StopResolve:
         say("stopped; answers given so far are saved")
     if not answered:

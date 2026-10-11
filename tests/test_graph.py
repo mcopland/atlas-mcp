@@ -719,6 +719,33 @@ def test_only_an_evidence_backed_outside_fqdn_is_derived_as_external(
     assert [u["key"] for u in g["unresolved"]] == [key]
 
 
+@pytest.mark.parametrize(
+    "kind,key",
+    [
+        ("grpc", "billing.v1.billingservice"),
+        ("http", "Acme.Orm.Billing"),
+        ("other", "api.vendor.com"),
+        ("other", "Acme.Orm.Billing"),
+    ],
+)
+def test_a_dotted_name_that_is_not_evidently_a_host_is_not_derived_as_external(
+    make_cfg, make_manifest, graph_of, kind, key
+):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(
+        cfg, "client", consumes=[{"kind": kind, "name": "n", "key": key, "evidence": ev()}]
+    )
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {}
+    assert [u["key"] for u in g["unresolved"]] == [key]
+
+
+def test_a_bare_lowercase_host_is_derived_for_an_http_consume(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "client", consumes=http_consumer("api.vendor.com"))
+    assert list(graph_of(cfg)["external_nodes"]) == ["api.vendor.com"]
+
+
 def test_nothing_is_derived_as_external_without_internal_domains(make_cfg, make_manifest, graph_of):
     cfg = make_cfg()
     make_manifest(cfg, "client", consumes=http_consumer("https://api.vendor.com/v1"))
@@ -868,6 +895,24 @@ def test_override_hosts_merge_and_relabel_derived_externals(make_cfg, make_manif
     assert {e["to"] for e in g["external_edges"]} == {"worklog"}
 
 
+def test_an_answer_matches_a_consume_key_with_stray_whitespace(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "client", consumes=http_consumer(" MONGO_URI "))
+    write_overrides(cfg, [target("MONGO_URI", "client", "generic", tag="mongo")])
+    g = graph_of(cfg)
+    assert [r["tag"] for r in g["generic"]] == ["mongo"]
+    assert g["resolution"]["stale_overrides"] == []
+
+
+def test_external_and_repo_diagram_ids_never_collide(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "x-foo", consumes=http_consumer("WORKLOG_URL"))
+    write_overrides(cfg, [target("WORKLOG_URL", "x-foo", "external", external="foo")])
+    graph_of(cfg)
+    text = (cfg["atlas_dir"] / "docs" / "outbound.md").read_text()
+    assert 'n_x_foo["x-foo"]' in text and 'e_foo(["foo"])' in text
+
+
 def mongo_consumers(cfg, make_manifest, repos):
     for repo in repos:
         make_manifest(cfg, repo, consumes=http_consumer("MONGO_URI"))
@@ -982,6 +1027,8 @@ def test_a_missing_overrides_file_is_empty(make_cfg):
             "duplicate",
         ),
         ('{"externals": {"x": {"hosts": "h"}}}', "hosts"),
+        ('{"externals": []}', "'externals'"),
+        ('{"groups": ["x"]}', "'groups'"),
     ],
 )
 def test_a_bad_overrides_file_fails_naming_the_file_and_the_problem(make_cfg, body, fragment):
@@ -1023,7 +1070,7 @@ def test_outbound_doc_lists_each_third_party_with_its_consumers(make_cfg, make_m
     text = (cfg["atlas_dir"] / "docs" / "outbound.md").read_text()
     assert "## api.vendor.com" in text
     assert "client" in text and "https://api.vendor.com/v1" in text
-    assert "```mermaid" in text and "n_x_api_vendor_com" in text
+    assert "```mermaid" in text and "e_api_vendor_com" in text
 
 
 def test_outbound_doc_exists_and_says_so_when_there_is_nothing_outbound(
@@ -1050,7 +1097,7 @@ def test_domain_diagram_and_index_surface_the_externals(make_cfg, make_manifest,
     outbound_fixture(cfg, make_manifest)
     graph_of(cfg)
     domain = (cfg["atlas_dir"] / "docs" / "domains" / "payments.md").read_text()
-    assert "n_x_api_vendor_com" in domain and "n_client --" in domain
+    assert "e_api_vendor_com" in domain and "n_client --" in domain
     assert "docs/outbound.md" in (cfg["atlas_dir"] / "index.md").read_text()
 
 

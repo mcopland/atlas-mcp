@@ -204,3 +204,41 @@ def test_main_dispatches_resolve(make_cfg, tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", argv)
     atlas.main()
     assert seen == {"top": 3}
+
+
+def test_linking_a_shared_target_to_one_consumer_links_the_others(world):
+    cfg = world({"orders": consume("ORDERS_DB_URL"), "reports": consume("ORDERS_DB_URL")})
+    s = Session("l", "orders")
+    g = run(cfg, s)
+    assert [(t["repo"], t["to"]) for t in saved(cfg)["targets"]] == [("reports", "orders")]
+    assert [(u["repo"], u["key"]) for u in g["unresolved"]] == [("orders", "ORDERS_DB_URL")]
+    assert "1 answers saved" in s.out
+
+
+def test_a_group_cannot_be_reused_under_a_different_tag(world):
+    cfg = world({"a": consume("MONGO_URI"), "b": consume("PG_URI")})
+    atlas.write_json(
+        cfg["resolve_overrides"],
+        {"version": 1, "groups": {"shared": {"label": "Shared", "tag": "mongo"}}},
+    )
+    s = Session("g", "mongo", "shared", "q")
+    run(cfg, s)  # first target (most consumers, then name): MONGO_URI joins the group
+    s = Session("g", "postgres", "shared", "pg", "PG")
+    run(cfg, s)
+    assert "group 'shared' is tagged 'mongo'" in s.out
+    groups = {t["key"]: t.get("group") for t in saved(cfg)["targets"]}
+    assert groups["PG_URI"] == "pg"
+
+
+def test_a_file_corrupted_mid_session_stops_with_its_path(world):
+    cfg = world({"client": consume("X_URL")})
+    session = Session("e", "vendor", "Vendor")
+
+    def ask(prompt):
+        if "external id" in prompt:
+            cfg["resolve_overrides"].write_text("{bad")
+        return session.ask(prompt)
+
+    with pytest.raises(SystemExit) as e:
+        atlas.cmd_resolve(cfg, argparse.Namespace(top=None), ask=ask, say=session.say)
+    assert str(cfg["resolve_overrides"]) in str(e.value)
