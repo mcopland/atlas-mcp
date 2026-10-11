@@ -300,6 +300,13 @@ def load_config(path):
     if not isinstance(domains, list) or not all(isinstance(d, str) and d.strip() for d in domains):
         sys.exit(f"internal_domains must be a list of domain names, got {domains!r}")
     cfg["internal_domains"] = [re.sub(r"^(?:\*\.|\.)+", "", d.strip().lower()) for d in domains]
+    raw = cfg.get("resolve_overrides")
+    if raw is None:
+        cfg["resolve_overrides"] = cfg["atlas_dir"] / "resolve_overrides.json"
+    elif isinstance(raw, str) and raw.strip():
+        cfg["resolve_overrides"] = expand(raw)
+    else:
+        sys.exit(f"resolve_overrides must be a file path, got {raw!r}")
     cfg["domains"] = [str(d).strip().lower() for d in cfg["domains"] if str(d).strip()]
     return cfg
 
@@ -2285,9 +2292,85 @@ def load_manifests(ad, known):
     return manifests
 
 
+OVERRIDE_ACTIONS = {"link": "to", "external": "external", "generic": "tag"}
+
+
+def load_overrides(path):
+    """The human answers `resolve` records, keyed by (target, consuming repo). A missing file is
+    no answers; a malformed one stops the build, because skipping it would quietly undo them."""
+
+    def bad(problem):
+        sys.exit(f"invalid resolve overrides {path}: {problem}")
+
+    def text(entry, field, where, required=True):
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is None and not required:
+            return ""
+        return bad(f"{where} needs a non-empty string {field!r}, got {value!r}")
+
+    empty = {"externals": {}, "groups": {}, "targets": {}}
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty
+    except OSError as e:
+        return bad(f"cannot read it: {e}")
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return bad(f"invalid JSON: {e}")
+    if not isinstance(doc, dict):
+        return bad("expected a JSON object")
+    if doc.get("version", 1) != 1:
+        return bad(f"unsupported version {doc['version']!r}")
+    out = {"externals": {}, "groups": {}, "targets": {}}
+    for eid, d in (doc.get("externals") or {}).items():
+        d = d if isinstance(d, dict) else bad(f"externals[{eid!r}] must be an object")
+        hosts = d.get("hosts", [])
+        if not isinstance(hosts, list) or not all(isinstance(h, str) and h.strip() for h in hosts):
+            bad(f"externals[{eid!r}] 'hosts' must be a list of host names, got {hosts!r}")
+        out["externals"][eid] = {
+            "label": str(d.get("label") or "").strip(),
+            "hosts": sorted({h.strip().lower() for h in hosts}),
+        }
+    for gid, d in (doc.get("groups") or {}).items():
+        d = d if isinstance(d, dict) else bad(f"groups[{gid!r}] must be an object")
+        out["groups"][gid] = {
+            "label": str(d.get("label") or "").strip(),
+            "tag": str(d.get("tag") or "").strip(),
+        }
+    targets = doc.get("targets") or []
+    if not isinstance(targets, list):
+        bad("'targets' must be a list")
+    for i, t in enumerate(targets):
+        where = f"targets[{i}]"
+        t = t if isinstance(t, dict) else bad(f"{where} must be an object")
+        entry = {"key": text(t, "key", where), "repo": text(t, "repo", where)}
+        action = t.get("action")
+        if action not in OVERRIDE_ACTIONS:
+            bad(
+                f"{where} has unknown action {action!r}; expected one of {sorted(OVERRIDE_ACTIONS)}"
+            )
+        entry["action"] = action
+        field = OVERRIDE_ACTIONS[action]
+        entry[field] = text(t, field, where)
+        if action == "generic" and (group := text(t, "group", where, required=False)):
+            entry["group"] = group
+        slot = (entry["key"].lower(), entry["repo"])
+        if slot in out["targets"]:
+            bad(
+                f"{where} is a duplicate of an earlier answer for {entry['key']!r} in {entry['repo']!r}"
+            )
+        out["targets"][slot] = entry
+    return out
+
+
 def build(cfg, known):
     ad = cfg["atlas_dir"]
     manifests = load_manifests(ad, known)
+    overrides = load_overrides(cfg["resolve_overrides"])
     stop = cfg["generic_identifiers"]
     index = {}  # (family, form) -> {repo: strength}
 
@@ -2353,10 +2436,95 @@ def build(cfg, known):
             provide("pkg", p["name"], name, "alias")
 
     edges, unresolved, seen = [], [], set()
-    external_nodes, external_edges = {}, []
+    external_nodes, external_edges, generic_rows = {}, [], []
     buckets = {"internal": 0, "external": 0, "generic": 0, "unknown": 0}
+    answers, answered = overrides["targets"], set()
+    host_owner = {h: eid for eid, d in overrides["externals"].items() for h in d["hosts"]}
+
+    def edge_row(src, dst, item, kind, key, match):
+        return {
+            "from": src,
+            "to": dst,
+            "kind": kind,
+            "key": key,
+            "name": item.get("name", key),
+            "detail": item.get("detail", ""),
+            "evidence": item.get("evidence"),
+            "match": match,
+        }
+
+    def add_edge(src, dst, item, kind, key, match):
+        sig = (src, dst, kind, key)
+        if sig not in seen:
+            seen.add(sig)
+            edges.append(edge_row(src, dst, item, kind, key, match))
+
+    def unknown(src, item, kind, key, candidates=()):
+        buckets["unknown"] += 1
+        row = {
+            "repo": src,
+            "kind": kind,
+            "key": key,
+            "name": item.get("name", key),
+            "evidence": item.get("evidence"),
+        }
+        if candidates:  # too many weak matches to pick from; hand the agent the shortlist
+            row["candidates"] = sorted(candidates)
+        unresolved.append(row)
+
+    def external(src, ext_id, host, item, kind, key, match):
+        defined = overrides["externals"].get(ext_id)
+        node = external_nodes.setdefault(
+            ext_id,
+            {
+                "label": (defined or {}).get("label") or ext_id,
+                "kind": "external",
+                "hosts": list((defined or {}).get("hosts", [])),
+                "source": "override" if defined or match == "override" else "derived",
+            },
+        )
+        if host and host not in node["hosts"]:
+            node["hosts"] = sorted({*node["hosts"], host})
+        sig = (src, ext_id, kind, key)
+        if sig not in seen:
+            seen.add(sig)
+            external_edges.append(edge_row(src, ext_id, item, kind, key, match))
+        buckets["external"] += 1
+
+    def apply_answer(src, item, kind, key, answer):
+        action = answer["action"]
+        if action == "link":
+            if answer["to"] in manifests and answer["to"] != src:
+                buckets["internal"] += 1
+                add_edge(src, answer["to"], item, kind, key, "override")
+            else:
+                print(
+                    f"warn: resolve override for {key!r} in {src}: no repo named {answer['to']!r}",
+                    file=sys.stderr,
+                )
+                unknown(src, item, kind, key)
+        elif action == "external":
+            external(src, answer["external"], None, item, kind, key, "override")
+        else:
+            row = {
+                "repo": src,
+                "kind": kind,
+                "key": key,
+                "name": item.get("name", key),
+                "evidence": item.get("evidence"),
+                "tag": answer["tag"],
+            }
+            if answer.get("group"):
+                row["group"] = answer["group"]
+            generic_rows.append(row)
+            buckets["generic"] += 1
 
     def link(src, item, kind, key, lookups):
+        slot = (key.lower(), src)
+        if slot in answers:  # a human answer outranks every rule
+            answered.add(slot)
+            apply_answer(src, item, kind, key, answers[slot])
+            return
         hits = {}
         for fam, form, strength in lookups:
             form = str(form).strip().lower()
@@ -2377,57 +2545,14 @@ def build(cfg, known):
             else ""
         )
         if host:
-            external_nodes.setdefault(
-                host, {"label": host, "kind": "external", "hosts": [host], "source": "derived"}
-            )
-            sig = (src, host, kind, key)
-            if sig not in seen:
-                seen.add(sig)
-                external_edges.append(
-                    {
-                        "from": src,
-                        "to": host,
-                        "kind": kind,
-                        "key": key,
-                        "name": item.get("name", key),
-                        "detail": item.get("detail", ""),
-                        "evidence": item.get("evidence"),
-                        "match": "derived",
-                    }
-                )
-            buckets["external"] += 1
-            return
-        if not hits or (not fan_in and len(hits) > cfg["max_ambiguous_hits"]):
-            buckets["unknown"] += 1
-            row = {
-                "repo": src,
-                "kind": kind,
-                "key": key,
-                "name": item.get("name", key),
-                "evidence": item.get("evidence"),
-            }
-            if hits:  # too many weak matches to pick from; hand the agent the shortlist
-                row["candidates"] = sorted(hits)
-            unresolved.append(row)
-            return
-        buckets["internal"] += 1
-        for dst, strength in hits.items():
-            sig = (src, dst, kind, key)
-            if sig in seen:
-                continue
-            seen.add(sig)
-            edges.append(
-                {
-                    "from": src,
-                    "to": dst,
-                    "kind": kind,
-                    "key": key,
-                    "name": item.get("name", key),
-                    "detail": item.get("detail", ""),
-                    "evidence": item.get("evidence"),
-                    "match": "ambiguous" if len(hits) > 1 and not fan_in else strength,
-                }
-            )
+            external(src, host_owner.get(host, host), host, item, kind, key, "derived")
+        elif not hits or (not fan_in and len(hits) > cfg["max_ambiguous_hits"]):
+            unknown(src, item, kind, key, hits)
+        else:
+            buckets["internal"] += 1
+            for dst, strength in hits.items():
+                match = "ambiguous" if len(hits) > 1 and not fan_in else strength
+                add_edge(src, dst, item, kind, key, match)
 
     for name, m in manifests.items():
         for item in m.get("consumes") or []:
@@ -2475,6 +2600,42 @@ def build(cfg, known):
             if key and key not in GENERIC_STORES:
                 stores.setdefault(key, {})[name] = ds.get("access", "")
     shared = [{"name": k, "repos": v} for k, v in sorted(stores.items()) if len(v) > 1]
+    # Only an explicit answer groups consumers of a generic var; no rule ever does.
+    members = {}
+    for row in generic_rows:
+        if row.get("group"):
+            members.setdefault(row["group"], {})[row["repo"]] = ""
+    for gid, repos in sorted(members.items()):
+        if len(repos) > 1:
+            defined = overrides["groups"].get(gid, {})
+            tag = defined.get("tag") or next(
+                r["tag"] for r in generic_rows if r.get("group") == gid
+            )
+            shared.append(
+                {
+                    "name": gid,
+                    "label": defined.get("label") or gid,
+                    "tag": tag,
+                    "kind": "generic",
+                    "repos": repos,
+                    "source": "override",
+                }
+            )
+    stale = sorted(
+        (
+            {"key": a["key"], "repo": a["repo"], "action": a["action"]}
+            for slot, a in answers.items()
+            if slot not in answered
+        ),
+        key=lambda a: (a["repo"], a["key"]),
+    )
+    if stale:
+        shown = ", ".join(f"{a['key']} ({a['repo']})" for a in stale[:10])
+        print(
+            f"warn: {len(stale)} resolve overrides match no current consume ({shown}"
+            f"{' ...' if len(stale) > 10 else ''}); they are kept in {cfg['resolve_overrides']}",
+            file=sys.stderr,
+        )
 
     graph = {
         "generated_at": now().isoformat(timespec="seconds"),
@@ -2500,7 +2661,8 @@ def build(cfg, known):
         "shared_datastores": shared,
         "external_nodes": dict(sorted(external_nodes.items())),
         "external_edges": external_edges,
-        "resolution": {**buckets, "stale_overrides": []},
+        "generic": generic_rows,
+        "resolution": {**buckets, "stale_overrides": stale},
     }
     render_docs(ad, manifests, graph)
     write_json(ad / "graph.json", graph)  # published last: docs it points at already exist

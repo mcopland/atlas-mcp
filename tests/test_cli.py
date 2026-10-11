@@ -86,6 +86,20 @@ def test_internal_domains_are_normalised(make_cfg):
     assert make_cfg()["internal_domains"] == []
 
 
+def test_resolve_overrides_default_to_the_atlas_dir_and_can_be_moved(make_cfg, tmp_path):
+    cfg = make_cfg()
+    assert cfg["resolve_overrides"] == cfg["atlas_dir"] / "resolve_overrides.json"
+    moved = make_cfg(resolve_overrides=str(tmp_path / "mine.json"))
+    assert moved["resolve_overrides"] == tmp_path / "mine.json"
+
+
+@pytest.mark.parametrize("value", [1, ["x"], ""])
+def test_load_config_rejects_a_non_path_resolve_overrides(make_cfg, value):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(resolve_overrides=value)
+    assert "resolve_overrides" in str(e.value)
+
+
 def test_config_extends_the_generic_identifier_stoplist(make_cfg):
     cfg = make_cfg(generic_identifiers=["Orders"])
     assert "orders" in cfg["generic_identifiers"]

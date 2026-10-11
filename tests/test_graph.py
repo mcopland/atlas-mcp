@@ -770,6 +770,230 @@ def test_every_target_lands_in_exactly_one_bucket(make_cfg, make_manifest, graph
     assert sum(g["resolution"][b] for b in ("internal", "external", "generic", "unknown")) == 4
 
 
+def write_overrides(cfg, targets=(), externals=None, groups=None):
+    atlas.write_json(
+        cfg["resolve_overrides"],
+        {
+            "version": 1,
+            "externals": externals or {},
+            "groups": groups or {},
+            "targets": list(targets),
+        },
+    )
+
+
+def target(key, repo, action, **fields):
+    return {"key": key, "repo": repo, "action": action, **fields}
+
+
+def test_a_link_override_edges_an_otherwise_unresolved_target(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "orders-svc")
+    make_manifest(cfg, "client", consumes=http_consumer("ORDERS_BACKEND"))
+    write_overrides(cfg, [target("ORDERS_BACKEND", "client", "link", to="orders-svc")])
+    g = graph_of(cfg)
+    assert [(e["from"], e["to"], e["match"]) for e in g["edges"]] == [
+        ("client", "orders-svc", "override")
+    ]
+    assert g["unresolved"] == []
+    assert g["resolution"]["internal"] == 1
+
+
+def test_an_override_beats_a_rule_and_matches_case_and_kind_loosely(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    make_manifest(cfg, "orders-service")
+    make_manifest(cfg, "billing")
+    make_manifest(
+        cfg,
+        "client",
+        consumes=[{"kind": "other", "name": "o", "key": "ORDERS_SERVICE_URL", "evidence": ev()}],
+    )
+    write_overrides(cfg, [target("orders_service_url", "client", "link", to="billing")])
+    assert [(e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [("billing", "override")]
+
+
+def test_a_link_to_an_unknown_repo_stays_unknown_and_warns(
+    make_cfg, make_manifest, graph_of, capsys
+):
+    cfg = make_cfg()
+    make_manifest(cfg, "client", consumes=http_consumer("ORDERS_BACKEND"))
+    write_overrides(cfg, [target("ORDERS_BACKEND", "client", "link", to="gone")])
+    g = graph_of(cfg)
+    assert g["edges"] == [] and [u["key"] for u in g["unresolved"]] == ["ORDERS_BACKEND"]
+    assert "gone" in capsys.readouterr().err
+
+
+def test_an_external_override_creates_a_labelled_node(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "client", consumes=http_consumer("WORKLOG_API_URL"))
+    write_overrides(
+        cfg,
+        [target("WORKLOG_API_URL", "client", "external", external="worklog")],
+        externals={"worklog": {"label": "Worklog SaaS API", "hosts": ["api.worklog.io"]}},
+    )
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {
+        "worklog": {
+            "label": "Worklog SaaS API",
+            "kind": "external",
+            "hosts": ["api.worklog.io"],
+            "source": "override",
+        }
+    }
+    assert [(e["to"], e["match"]) for e in g["external_edges"]] == [("worklog", "override")]
+    assert g["unresolved"] == [] and g["resolution"]["external"] == 1
+
+
+def test_an_undefined_external_id_is_created_labelled_by_its_id(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "client", consumes=http_consumer("X_URL"))
+    write_overrides(cfg, [target("X_URL", "client", "external", external="state-portal")])
+    assert graph_of(cfg)["external_nodes"]["state-portal"]["label"] == "state-portal"
+
+
+def test_override_hosts_merge_and_relabel_derived_externals(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "a", consumes=http_consumer("https://api.worklog.io/v1"))
+    make_manifest(cfg, "b", consumes=http_consumer("https://eu.worklog.io/v1"))
+    write_overrides(
+        cfg,
+        externals={"worklog": {"label": "Worklog", "hosts": ["api.worklog.io", "eu.worklog.io"]}},
+    )
+    g = graph_of(cfg)
+    assert list(g["external_nodes"]) == ["worklog"]
+    assert g["external_nodes"]["worklog"]["label"] == "Worklog"
+    assert sorted(e["from"] for e in g["external_edges"]) == ["a", "b"]
+    assert {e["to"] for e in g["external_edges"]} == {"worklog"}
+
+
+def mongo_consumers(cfg, make_manifest, repos):
+    for repo in repos:
+        make_manifest(cfg, repo, consumes=http_consumer("MONGO_URI"))
+
+
+def test_a_generic_var_is_separate_per_consumer_unless_explicitly_grouped(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    mongo_consumers(cfg, make_manifest, ["a", "b", "c"])
+    write_overrides(
+        cfg,
+        [
+            target("MONGO_URI", "a", "generic", tag="mongo", group="mongo-billing"),
+            target("MONGO_URI", "b", "generic", tag="mongo", group="mongo-billing"),
+            target("MONGO_URI", "c", "generic", tag="mongo"),
+        ],
+        groups={"mongo-billing": {"label": "Billing Mongo"}},
+    )
+    g = graph_of(cfg)
+    assert [(r["repo"], r["tag"], r.get("group")) for r in g["generic"]] == [
+        ("a", "mongo", "mongo-billing"),
+        ("b", "mongo", "mongo-billing"),
+        ("c", "mongo", None),
+    ]
+    assert [s for s in g["shared_datastores"] if s.get("source") == "override"] == [
+        {
+            "name": "mongo-billing",
+            "label": "Billing Mongo",
+            "tag": "mongo",
+            "kind": "generic",
+            "repos": {"a": "", "b": ""},
+            "source": "override",
+        }
+    ]
+    assert g["unresolved"] == [] and g["resolution"]["generic"] == 3
+
+
+def test_no_rule_ever_groups_a_generic_var(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    mongo_consumers(cfg, make_manifest, ["a", "b", "c"])
+    g = graph_of(cfg)
+    assert g["shared_datastores"] == [] and g["generic"] == []
+    assert [u["repo"] for u in g["unresolved"]] == ["a", "b", "c"]
+
+
+def test_a_group_of_one_is_not_reported_as_shared(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    mongo_consumers(cfg, make_manifest, ["a"])
+    write_overrides(cfg, [target("MONGO_URI", "a", "generic", tag="mongo", group="solo")])
+    g = graph_of(cfg)
+    assert g["shared_datastores"] == [] and g["generic"][0]["group"] == "solo"
+
+
+def test_an_override_matching_nothing_is_reported_stale_not_dropped(
+    make_cfg, make_manifest, graph_of, capsys
+):
+    cfg = make_cfg()
+    make_manifest(cfg, "client")
+    write_overrides(cfg, [target("OLD_URL", "client", "external", external="x")])
+    g = graph_of(cfg)
+    assert g["resolution"]["stale_overrides"] == [
+        {"key": "OLD_URL", "repo": "client", "action": "external"}
+    ]
+    assert "OLD_URL" in capsys.readouterr().err
+    assert atlas.load_overrides(cfg["resolve_overrides"])["targets"]
+
+
+def test_every_bucket_still_sums_to_the_targets_with_overrides(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "orders-service")
+    make_manifest(
+        cfg,
+        "client",
+        consumes=[
+            *http_consumer("ORDERS_SERVICE_URL"),
+            *http_consumer("https://api.vendor.com"),
+            *http_consumer("MONGO_URI"),
+            *http_consumer("MYSTERY_URL"),
+        ],
+    )
+    write_overrides(cfg, [target("MONGO_URI", "client", "generic", tag="mongo")])
+    r = graph_of(cfg)["resolution"]
+    assert (r["internal"], r["external"], r["generic"], r["unknown"]) == (1, 1, 1, 1)
+
+
+def test_a_missing_overrides_file_is_empty(make_cfg):
+    cfg = make_cfg()
+    assert atlas.load_overrides(cfg["resolve_overrides"]) == {
+        "externals": {},
+        "groups": {},
+        "targets": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "body,fragment",
+    [
+        ("{not json", "invalid JSON"),
+        ("[]", "JSON object"),
+        ('{"version": 2}', "version"),
+        ('{"targets": [{"key": "K", "repo": "r", "action": "nuke"}]}', "action"),
+        ('{"targets": [{"key": "K", "repo": "r", "action": "link"}]}', "'to'"),
+        ('{"targets": [{"key": "K", "repo": "r", "action": "external"}]}', "'external'"),
+        ('{"targets": [{"key": "K", "repo": "r", "action": "generic"}]}', "'tag'"),
+        ('{"targets": [{"key": "", "repo": "r", "action": "generic", "tag": "t"}]}', "'key'"),
+        (
+            (
+                '{"targets": [{"key": "K", "repo": "r", "action": "generic", "tag": "t"},'
+                ' {"key": "k", "repo": "r", "action": "generic", "tag": "t"}]}'
+            ),
+            "duplicate",
+        ),
+        ('{"externals": {"x": {"hosts": "h"}}}', "hosts"),
+    ],
+)
+def test_a_bad_overrides_file_fails_naming_the_file_and_the_problem(make_cfg, body, fragment):
+    cfg = make_cfg()
+    cfg["resolve_overrides"].parent.mkdir(parents=True, exist_ok=True)
+    cfg["resolve_overrides"].write_text(body)
+    with pytest.raises(SystemExit) as e:
+        atlas.load_overrides(cfg["resolve_overrides"])
+    message = str(e.value)
+    assert str(cfg["resolve_overrides"]) in message and fragment in message
+
+
 def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
     cfg = make_cfg()
     make_manifest(cfg, "good")
