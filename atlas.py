@@ -10,12 +10,14 @@
   atlas.py build
   atlas.py prune [--apply]
   atlas.py unresolved [--top N]
+  atlas.py resolve [--top N]
   atlas.py status
 
 Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
   repos/<name>.json   per-repo manifest (LLM facts + deterministic repo facts + _meta)
   repos.json          resolved repo name -> path map from the last run
   graph.json          joined cross-repo graph (read by atlas_mcp.py)
+  resolve_overrides.json  human answers from `resolve`, applied by every build
   docs/<name>.md      per-repo doc with component diagram
   docs/domains/*.md   per-domain HLD diagram
   index.md            one line per repo
@@ -3003,6 +3005,179 @@ def cmd_unresolved(cfg, args):
         print(f"      from: {', '.join(sorted(g['repos'])[:6])}")
 
 
+class StopResolve(Exception):
+    """The operator quit or the input ended; every answer given so far is already saved."""
+
+
+RESOLVE_MENU = "  [l]ink to a repo  [e]xternal  [g]eneric  [{}skip  [q]uit > "
+SPLIT = "split"
+
+
+def cmd_resolve(cfg, args, ask=input, say=print):
+    """Walk the targets no rule could place and record a human answer for each, keyed by
+    (target, consuming repo). The answers go to resolve_overrides.json after every question, so
+    a quit or a dropped terminal loses nothing, and the next build applies them."""
+    path = cfg["resolve_overrides"]
+    with atlas_lock(cfg["atlas_dir"]):  # not held while prompting: generate may run meanwhile
+        graph = build(cfg, known_repo_names(cfg))
+    targets = {}
+    for u in graph["unresolved"]:
+        t = targets.setdefault(
+            u["key"].lower(),
+            {"key": u["key"], "kinds": set(), "consumers": {}, "candidates": set()},
+        )
+        t["kinds"].add(u.get("kind", ""))
+        t["consumers"].setdefault(u["repo"], u)
+        t["candidates"].update(u.get("candidates", []))
+    rows = sorted(targets.values(), key=lambda t: (-len(t["consumers"]), t["key"].lower()))
+    if args.top:
+        rows = rows[: args.top]
+    if not rows:
+        say("nothing to resolve: no unresolved targets")
+        return
+    repo_names = {n.lower(): n for n in graph["repos"]}
+
+    def prompt(text):
+        try:
+            return ask(text).strip()
+        except (EOFError, KeyboardInterrupt) as e:
+            raise StopResolve from e
+
+    def read_doc():
+        if not path.exists():
+            return {"version": 1}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def save(entries, defs):
+        doc = read_doc()
+        for section in ("externals", "groups"):
+            doc.setdefault(section, {}).update(defs.get(section, {}))
+        slots = {(e["key"].lower(), e["repo"]) for e in entries}
+        kept = [
+            t
+            for t in doc.get("targets") or []
+            if (str(t.get("key", "")).lower(), t.get("repo")) not in slots
+        ]
+        doc["targets"] = kept + entries
+        write_json(path, doc)
+
+    def ask_name(label, blank_ok=False):
+        while True:
+            text = prompt(f"  {label} > ")
+            if blank_ok and not text:
+                return ""
+            if REPO_NAME.fullmatch(text):
+                return text
+            say(f"  {text!r} is not a plain name; use letters, digits, '.', '_' and '-'")
+
+    def ask_repo(consumers, candidates):
+        while True:
+            text = prompt("  repo (name, or a candidate number; blank to go back) > ")
+            if not text:
+                return ""
+            if text.isdigit() and 1 <= int(text) <= len(candidates):
+                name = candidates[int(text) - 1]
+            elif not (name := repo_names.get(text.lower())):
+                say(f"  no repo named {text!r}")
+                continue
+            if name in consumers:
+                say(f"  {name} is itself a consumer of this target")
+                continue
+            return name
+
+    def decide(t, consumers, candidates, may_split):
+        """(entries, definitions) for these consumers, SPLIT to answer them one by one, or None."""
+        key = t["key"]
+        menu = RESOLVE_MENU.format("p]er consumer  [s]" if may_split else "s]")
+        while True:
+            choice = prompt(menu).lower()[:1]
+            if choice == "q":
+                raise StopResolve
+            if choice == "s":
+                return None
+            if choice == "p" and may_split:
+                return SPLIT
+            if choice == "l":
+                if to := ask_repo(consumers, candidates):
+                    return [
+                        {"key": key, "repo": r, "action": "link", "to": to} for r in consumers
+                    ], {}
+            elif choice == "e":
+                doc = read_doc()
+                defined = doc.get("externals", {})
+                if listed := sorted({*graph["external_nodes"], *defined}):
+                    say(f"  known externals: {', '.join(listed)}")
+                ext = ask_name("external id")
+                defs = {}
+                if ext not in defined:
+                    label = prompt("  label (blank = the id) > ") or ext
+                    defs = {"externals": {ext: {"label": label, "hosts": []}}}
+                return [
+                    {"key": key, "repo": r, "action": "external", "external": ext}
+                    for r in consumers
+                ], defs
+            elif choice == "g":
+                tag = ask_name("tag (the kind of store, e.g. mongo)").lower()
+                group = ask_name("shared group id (blank = each consumer stays separate)", True)
+                defs = {}
+                if group and group not in read_doc().get("groups", {}):
+                    label = prompt("  label for the group (blank = the id) > ") or group
+                    defs = {"groups": {group: {"label": label, "tag": tag}}}
+                entries = [
+                    {
+                        "key": key,
+                        "repo": r,
+                        "action": "generic",
+                        "tag": tag,
+                        **({"group": group} if group else {}),
+                    }
+                    for r in consumers
+                ]
+                return entries, defs
+            else:
+                say(f"  {choice!r} is not a choice")
+
+    answered = 0
+    try:
+        for n, t in enumerate(rows, 1):
+            consumers = sorted(t["consumers"])
+            candidates = sorted(t["candidates"])
+            say("")
+            say(
+                f"[{n}/{len(rows)}] {t['key']} ({', '.join(sorted(t['kinds']))}) "
+                f"{len(consumers)} consumer(s)"
+            )
+            for repo in consumers[:6]:
+                row = t["consumers"][repo]
+                say(f"  {repo}: {row.get('name', t['key'])} ({row.get('evidence')})")
+            if len(consumers) > 6:
+                say(f"  ... and {len(consumers) - 6} more")
+            if candidates:
+                say("  candidates: " + "  ".join(f"{i}) {c}" for i, c in enumerate(candidates, 1)))
+            outcome = decide(t, consumers, candidates, len(consumers) > 1)
+            if outcome == SPLIT:
+                for repo in consumers:
+                    row = t["consumers"][repo]
+                    say(f"  -- {repo}: {row.get('name', t['key'])} ({row.get('evidence')})")
+                    if one := decide(t, [repo], candidates, False):
+                        save(*one)
+                        answered += 1
+            elif outcome:
+                save(*outcome)
+                answered += len(consumers)
+    except StopResolve:
+        say("stopped; answers given so far are saved")
+    if not answered:
+        say("no answers saved")
+        return
+    with atlas_lock(cfg["atlas_dir"]):
+        after = build(cfg, known_repo_names(cfg))
+    say(
+        f"{answered} answers saved to {path}; "
+        f"unknown {graph['resolution']['unknown']} -> {after['resolution']['unknown']}"
+    )
+
+
 def cmd_status(cfg, _args):
     repos = discover_repos(cfg)
     if not repos:
@@ -3069,6 +3244,8 @@ def main():
     p.add_argument("--apply", action="store_true", help="move orphan manifests to repos/_orphans")
     u = sub.add_parser("unresolved")
     u.add_argument("--top", type=int, default=25)
+    r = sub.add_parser("resolve")
+    r.add_argument("--top", type=positive_int, help="only the N targets with the most consumers")
     sub.add_parser("status")
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -3082,6 +3259,7 @@ def main():
         "build": cmd_build,
         "prune": cmd_prune,
         "unresolved": cmd_unresolved,
+        "resolve": cmd_resolve,
         "status": cmd_status,
     }[args.cmd](cfg, args)
 
