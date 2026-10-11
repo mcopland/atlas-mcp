@@ -607,6 +607,71 @@ def test_a_placeholder_identifier_never_forms_an_exact_edge(make_cfg, make_manif
     assert graph_of(cfg)["edges"] == []
 
 
+def env_publisher(cfg, make_manifest, name, var="DATAW_URI", consumes=()):
+    make_manifest(
+        cfg,
+        name,
+        exposes=[
+            {"kind": "envvar", "name": var, "key": var, "evidence": ev(), "source": "deterministic"}
+        ],
+        consumes=list(consumes),
+    )
+
+
+def env_consumer(var="DATAW_URI", kind="other"):
+    return [{"kind": kind, "name": var, "key": var, "evidence": ev("b.py")}]
+
+
+def test_a_published_env_var_name_links_its_consumers_at_alias(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    env_publisher(cfg, make_manifest, "dw-loader")
+    make_manifest(cfg, "report", consumes=env_consumer())
+    make_manifest(cfg, "etl", consumes=env_consumer(kind="database"))
+    g = graph_of(cfg)
+    assert sorted((e["from"], e["to"], e["match"]) for e in g["edges"]) == [
+        ("etl", "dw-loader", "alias"),
+        ("report", "dw-loader", "alias"),
+    ]
+    assert g["unresolved"] == []
+
+
+def test_env_var_names_are_matched_whole_not_by_prefix(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    env_publisher(cfg, make_manifest, "dw-loader")
+    make_manifest(cfg, "report", consumes=env_consumer("DATAW_URL"))
+    assert graph_of(cfg)["edges"] == []
+
+
+def test_too_many_publishers_of_one_env_var_stay_unresolved(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    for i in range(4):
+        env_publisher(cfg, make_manifest, f"pub-{i}")
+    make_manifest(cfg, "report", consumes=env_consumer())
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert g["unresolved"][0]["candidates"] == [f"pub-{i}" for i in range(4)]
+
+
+def test_a_repo_that_consumes_its_own_published_env_var_does_not_provide_it(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    env_publisher(cfg, make_manifest, "reader", consumes=env_consumer())
+    make_manifest(cfg, "report", consumes=env_consumer())
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert [u["repo"] for u in g["unresolved"]] == ["reader", "report"]
+
+
+def test_a_generic_env_var_is_never_linked_by_name(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    env_publisher(cfg, make_manifest, "infra", var="MONGO_URI")
+    make_manifest(cfg, "report", consumes=env_consumer("MONGO_URI"))
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert [u["key"] for u in g["unresolved"]] == ["MONGO_URI"]
+
+
 def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
     cfg = make_cfg()
     make_manifest(cfg, "good")

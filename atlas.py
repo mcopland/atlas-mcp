@@ -70,6 +70,7 @@ FAMILY = {
     "stream": "msg",
     "package": "pkg",
     "database": "db",
+    "envvar": "env",
 }
 GENERIC_STORES = {
     "db",
@@ -109,6 +110,23 @@ GENERIC_IDENTIFIERS = {
     "www",
     "localhost",
 }
+# Env-var stems that name a kind of infrastructure, not one service. Several unrelated repos
+# can read the same MONGO_URI and point it at different clusters, so the name alone says nothing.
+GENERIC_STEMS = GENERIC_STORES | {
+    "mongo",
+    "mongodb",
+    "sql",
+    "mssql",
+    "sqlserver",
+    "kafka",
+    "rabbitmq",
+    "amqp",
+    "elasticsearch",
+    "es",
+    "storage",
+    "queue",
+}
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 ENV_SUFFIX = re.compile(r"_(?:BASE_URL|URL|URI|HOSTNAME|HOST|ENDPOINT|ADDRESS|ADDR|PORT)$")
 RANK = {"exact": 0, "alias": 1, "envvar": 2}
 GRADLE_DEP = re.compile(
@@ -1027,7 +1045,7 @@ def parse_yaml_docs(text):
 
 # ---------- deterministic repo facts ----------
 
-FACTS_VERSION = 6
+FACTS_VERSION = 7
 FACTS_MAX_YAML_FILES = 400
 CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
 OPENAPI_JSON = ("openapi*.json", "swagger*.json")
@@ -1035,6 +1053,9 @@ PROTO_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;")
 PROTO_SERVICE = re.compile(r"^\s*service\s+(\w+)\s*\{")
 TF_RESOURCE = re.compile(r'^\s*resource\s+"(\w+)"\s+"[^"]*"\s*\{')
 TF_LITERAL = re.compile(r'^\s*(\w+)\s*=\s*"([^"]*)"\s*$')
+TF_OUTPUT = re.compile(r'^\s*output\s+"([^"]+)"\s*\{')
+ENV_FILES = {".env.example", ".env.sample", ".env.template", "env.example"}
+ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 TF_RESOURCES = {  # resource type -> (attribute holding the real name, our kind, is a datastore)
     "aws_sqs_queue": ("name", "queue", False),
     "aws_s3_bucket": ("bucket", "s3", True),
@@ -1045,6 +1066,11 @@ TF_RESOURCES = {  # resource type -> (attribute holding the real name, our kind,
     "google_storage_bucket": ("name", "gcs", True),
     "azurerm_servicebus_queue": ("name", "queue", False),
     "azurerm_servicebus_topic": ("name", "topic", False),
+    # Config keys a repo publishes for others to read: the name is the contract, never the value.
+    "aws_ssm_parameter": ("name", "envvar", False),
+    "azurerm_key_vault_secret": ("name", "envvar", False),
+    "azurerm_app_configuration_key": ("key", "envvar", False),
+    "google_secret_manager_secret": ("secret_id", "envvar", False),
 }
 
 
@@ -1074,6 +1100,21 @@ def codeowners_rule(text):
         if parts[0] == "*":
             break
     return best or []
+
+
+def env_name(raw):
+    """dataw-uri -> DATAW_URI, /prod/dataw/DATAW_URI -> DATAW_URI. Empty unless the result is an
+    env-var-shaped name ending in a connection suffix, which is all the join can use."""
+    last = str(raw or "").strip().rsplit("/", 1)[-1]
+    name = re.sub(r"[-.]", "_", last).upper()
+    return name if ENV_NAME.fullmatch(name) and ENV_SUFFIX.search(name) else ""
+
+
+def env_generic(name, stoplist=frozenset()):
+    """MONGO_URI says what kind of store it is, not which one."""
+    stem = ENV_SUFFIX.sub("", name).lower()
+    tokens = [t for t in re.split(r"[_-]", stem) if t]
+    return not tokens or all(t in GENERIC_STEMS or t in stoplist for t in tokens)
 
 
 def extract_facts(repo, stoplist=frozenset(), files=None):
@@ -1120,6 +1161,26 @@ def extract_facts(repo, stoplist=frozenset(), files=None):
                     "source": "deterministic",
                 }
             )
+
+    declared = []  # (env var name, detail, evidence) the repo lists in its own files
+
+    def publish_env(raw, detail, evidence):
+        """A config key the repo publishes for others. Only the name is kept."""
+        name = env_name(raw)
+        if name and not env_generic(name, stoplist):
+            exposes.append(
+                {
+                    "kind": "envvar",
+                    "name": name,
+                    "key": name,
+                    "detail": detail,
+                    "evidence": evidence,
+                    "source": "deterministic",
+                }
+            )
+
+    def declare_env(raw, detail, evidence):
+        declared.append((str(raw or "").strip().split("=", 1)[0], detail, evidence))
 
     def own(raw):
         if (text := str(raw or "").strip()) and text not in owners:
@@ -1181,6 +1242,9 @@ def extract_facts(repo, stoplist=frozenset(), files=None):
                     # alias such as `postgres`, not a name this repo answers to.
                     if isinstance(body, dict) and body.get("build") is not None:
                         ident(name)
+                        env = body.get("environment")
+                        for var in env if isinstance(env, (list, dict)) else []:
+                            declare_env(var, "compose environment", rel)
             elif base.startswith(("openapi", "swagger")):
                 server_hosts(doc, rel)
             if not (doc.get("apiVersion") and doc.get("kind")):
@@ -1190,6 +1254,10 @@ def extract_facts(repo, stoplist=frozenset(), files=None):
                 expose("http", name, "kubernetes service", rel)
                 if name and (ns := str(meta.get("namespace") or "").strip()):
                     ident(f"{name}.{ns}.svc.cluster.local")
+            elif doc["kind"] == "ConfigMap":
+                data = doc.get("data")
+                for var in data if isinstance(data, dict) else []:
+                    declare_env(var, "kubernetes config map", rel)
             elif doc["kind"] == "Ingress":
                 rules = spec.get("rules")
                 for rule in rules if isinstance(rules, list) else []:
@@ -1227,6 +1295,9 @@ def extract_facts(repo, stoplist=frozenset(), files=None):
         for n, line in enumerate(text.splitlines(), 1):
             if m := TF_RESOURCE.match(line):
                 resource = TF_RESOURCES.get(m.group(1))
+            elif m := TF_OUTPUT.match(line):
+                resource = None
+                publish_env(m.group(1), "terraform output", f"{rel}:{n}")
             elif line.startswith("}"):
                 resource = None
             elif resource and (m := TF_LITERAL.match(line)):
@@ -1236,8 +1307,31 @@ def extract_facts(repo, stoplist=frozenset(), files=None):
                     continue
                 if is_store:
                     store(kind, m.group(2), f"{rel}:{n}")
+                elif kind == "envvar":
+                    publish_env(m.group(2), "terraform published config key", f"{rel}:{n}")
                 else:
                     expose(kind, m.group(2), f"terraform {kind}", f"{rel}:{n}", as_identifier=False)
+
+    for f in sorted(walk(repo, ENV_FILES, files)):
+        text = facts_text(f)
+        if text is None:
+            continue
+        rel = f.relative_to(repo).as_posix()
+        for n, line in enumerate(text.splitlines(), 1):
+            if m := ENV_ASSIGNMENT.match(line):
+                declare_env(m.group(1), "env example file", f"{rel}:{n}")
+
+    # An example file or compose service mostly lists what the repo reads. Only a variable named
+    # for the repo itself is a claim that it provides something.
+    own_forms = set()
+    for text in [repo.name, *idents.values()]:
+        host, first = svc_forms(text)
+        for form in (text.lower(), host, first):
+            own_forms |= {form, re.sub(r"-(?:service|svc|api)$", "", form)}
+    own_forms -= {"", *stoplist}
+    for var, detail, evidence in declared:
+        if set(envvar_forms(env_name(var))) & own_forms:
+            publish_env(var, detail, evidence)
 
     def first_per_key(items, keyer, order):
         """One entry per name. An ingress host is usually also the openapi server url, and the
@@ -2198,10 +2292,16 @@ def build(cfg, known):
         # sltc), but only a guess at it, so it never outranks a declared package name.
         provide("pkg", name, name, "alias")
         provide("pkg", norm_pkg("pypi", name), name, "alias")  # dependencies are stored normalised
+        consumed = {str(c.get("key") or "").lower() for c in m.get("consumes") or []}
         for item in m.get("exposes") or []:
             fam = FAMILY.get(item.get("kind"), "other")
             key = str(item.get("key") or "")
-            if fam == "svc":
+            if fam == "env":
+                # A name is a convention, so it is never better than an alias. A repo that also
+                # reads the variable lists it in its own example file as something it consumes.
+                if key.lower() not in consumed and not env_generic(key, stop):
+                    provide("env", key, name, "alias")
+            elif fam == "svc":
                 full, first = svc_forms(key)
                 provide("svc", full, name, "exact")
                 provide("svc", first, name, "alias")
@@ -2281,6 +2381,8 @@ def build(cfg, known):
                 lookups = [(fam, key, "exact")]
             if fam in ("db", "other") and (named := conn_key(key)):
                 lookups.append(("dotted", named, "alias"))
+            if ENV_NAME.fullmatch(key) and not env_generic(key, stop):
+                lookups.append(("env", key, "alias"))
             lookups += [("svc", f, "envvar") for f in envvar_forms(key)]
             link(name, item, kind, key, lookups)
         for p in (m.get("packages") or {}).get("depends_on", []):

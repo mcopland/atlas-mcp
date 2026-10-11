@@ -672,3 +672,88 @@ def test_deterministic_datastores_replace_a_colliding_model_entry():
     }
     atlas.merge_facts(m, facts(datastores=[det]), {})
     assert [(d["access"], d["evidence"]) for d in m["datastores"]] == [("owner", "main.tf:2")]
+
+
+# ---------- env-var names a repo publishes ----------
+
+
+def env_exposes(repo):
+    got = atlas.extract_facts(repo, atlas.GENERIC_IDENTIFIERS)["exposes"]
+    return {e["key"] for e in got if e["kind"] == "envvar"}
+
+
+def test_a_terraform_output_is_a_published_env_var_name(tmp_path):
+    write(tmp_path, {"main.tf": 'output "dataw_uri" {\n  value = aws_db_instance.x.endpoint\n}\n'})
+    assert env_exposes(tmp_path) == {"DATAW_URI"}
+
+
+@pytest.mark.parametrize(
+    "resource,attr,value",
+    [
+        ("azurerm_key_vault_secret", "name", "dataw-uri"),
+        ("aws_ssm_parameter", "name", "/prod/dataw/DATAW_URI"),
+        ("azurerm_app_configuration_key", "key", "dataw-uri"),
+        ("google_secret_manager_secret", "secret_id", "dataw-uri"),
+    ],
+)
+def test_a_published_config_key_resource_yields_a_normalised_env_var_name(
+    tmp_path, resource, attr, value
+):
+    write(tmp_path, {"main.tf": f'resource "{resource}" "x" {{\n  {attr} = "{value}"\n}}\n'})
+    assert env_exposes(tmp_path) == {"DATAW_URI"}
+
+
+@pytest.mark.parametrize("name", ["log_level", "mongo_uri", "database_url", "api_url"])
+def test_a_name_without_a_connection_suffix_or_with_a_generic_stem_is_not_published(tmp_path, name):
+    write(tmp_path, {"main.tf": f'output "{name}" {{\n  value = 1\n}}\n'})
+    assert env_exposes(tmp_path) == set()
+
+
+def test_env_example_names_count_only_when_the_stem_is_the_repos_own(tmp_path):
+    repo = tmp_path / "dataw-service"
+    write(
+        repo,
+        {".env.example": "DATAW_URI=\nOTHER_SERVICE_URL=\nLOG_LEVEL=debug\nexport DATAW_PORT=1\n"},
+    )
+    assert env_exposes(repo) == {"DATAW_URI", "DATAW_PORT"}
+
+
+def test_no_env_value_reaches_the_facts(tmp_path):
+    sentinel = "pw-" + "x9" * 8
+    repo = tmp_path / "dataw"
+    write(
+        repo,
+        {
+            ".env.example": f"DATAW_URI=mongodb://u:{sentinel}@h/db\n",
+            "docker-compose.yml": f"services:\n  dataw:\n    build: .\n    environment:\n"
+            f"      - DATAW_HOST={sentinel}\n",
+        },
+    )
+    got = atlas.extract_facts(repo)
+    assert env_exposes(repo) == {"DATAW_URI", "DATAW_HOST"}
+    assert sentinel not in json.dumps(got)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        "    environment:\n      - DATAW_URI=x\n      - UNRELATED_URL\n",
+        "    environment:\n      DATAW_URI: x\n      UNRELATED_URL: y\n",
+    ],
+)
+def test_compose_environment_of_a_built_service_follows_the_stem_guard(tmp_path, environment):
+    repo = tmp_path / "dataw"
+    write(repo, {"docker-compose.yml": f"services:\n  dataw:\n    build: .\n{environment}"})
+    assert env_exposes(repo) == {"DATAW_URI"}
+
+
+def test_a_config_map_key_follows_the_stem_guard(tmp_path):
+    repo = tmp_path / "dataw"
+    write(
+        repo,
+        {
+            "k8s/cm.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dataw\n"
+            "data:\n  DATAW_URI: x\n  ELSEWHERE_URL: y\n"
+        },
+    )
+    assert env_exposes(repo) == {"DATAW_URI"}
