@@ -231,6 +231,79 @@ def test_dependents_and_dependencies_filter_by_kind(loaded):
     assert json.loads(atlas_mcp.dependencies("web"))["unresolved"][0]["key"] == "stripe.com"
 
 
+@pytest.fixture
+def with_externals(atlas_env, tmp_path):
+    graph = {
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "repos": {"web": repo_row(tmp_path, "web"), "api": repo_row(tmp_path, "api")},
+        "edges": [],
+        "unresolved": [],
+        "shared_datastores": [],
+        "external_nodes": {
+            "stripe": {
+                "label": "Stripe",
+                "kind": "external",
+                "hosts": ["api.stripe.com"],
+                "source": "derived",
+            }
+        },
+        "external_edges": [
+            {
+                "from": "web",
+                "to": "stripe",
+                "kind": "http",
+                "key": "https://api.stripe.com",
+                "name": "charges",
+                "detail": "",
+                "evidence": "a.go",
+                "match": "derived",
+            }
+        ],
+        "generic": [
+            {
+                "repo": "api",
+                "kind": "other",
+                "key": "MONGO_URI",
+                "name": "mongo",
+                "evidence": "b.go",
+                "tag": "mongo",
+            }
+        ],
+    }
+    atlas_env(graph, {"web": manifest("web"), "api": manifest("api")})
+    return graph
+
+
+def test_get_repo_and_dependencies_list_third_parties_and_generic_targets(with_externals):
+    web = json.loads(atlas_mcp.get_repo("web"))
+    assert [(e["to"], e["label"]) for e in web["external"]] == [("stripe", "Stripe")]
+    assert web["generic"] == []
+    deps = json.loads(atlas_mcp.dependencies("api"))
+    assert [g["tag"] for g in deps["generic"]] == ["mongo"]
+    assert json.loads(atlas_mcp.dependencies("web", kind="topic"))["external"] == []
+
+
+def test_external_dependencies_lists_every_node_with_its_consumers(with_externals):
+    got = json.loads(atlas_mcp.external_dependencies())
+    assert got["count"] == 1
+    node = got["externals"][0]
+    assert (node["id"], node["label"], node["hosts"]) == ("stripe", "Stripe", ["api.stripe.com"])
+    assert [(c["repo"], c["key"]) for c in node["consumers"]] == [("web", "https://api.stripe.com")]
+
+
+def test_external_dependencies_for_one_repo(with_externals):
+    got = json.loads(atlas_mcp.external_dependencies("web"))
+    assert got["repo"] == "web" and [e["label"] for e in got["external"]] == ["Stripe"]
+    assert json.loads(atlas_mcp.external_dependencies("api"))["external"] == []
+
+
+def test_an_atlas_built_before_externals_existed_still_answers(loaded):
+    got = json.loads(atlas_mcp.get_repo("web"))
+    assert got["external"] == [] and got["generic"] == []
+    assert json.loads(atlas_mcp.dependencies("web"))["external"] == []
+    assert json.loads(atlas_mcp.external_dependencies())["count"] == 0
+
+
 def test_impact_groups_dependents_by_hop(loaded):
     got = json.loads(atlas_mcp.impact("billing"))
     assert got["repo"] == "billing"

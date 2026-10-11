@@ -2685,11 +2685,60 @@ def mtext(s):
     return re.sub(r"[\"'`|<>\[\]{}()#;]", " ", str(s)).strip()[:60] or "-"
 
 
+def outbound_doc(graph):
+    nodes, edges = graph["external_nodes"], graph["external_edges"]
+    lines = ["# Outbound third-party dependencies", ""]
+    if not nodes:
+        hint = (
+            "No outbound third-party dependencies found. Hosts outside `internal_domains` are "
+            "derived automatically once that is set in config.json; `atlas.py resolve` "
+            "classifies the rest by hand."
+        )
+        return "\n".join([*lines, hint, ""])
+    pairs = {}
+    for e in edges:
+        pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
+    lines += ["```mermaid", "flowchart LR"]
+    lines += [f'  {mid(n)}["{mtext(n)}"]' for n in sorted({a for a, _ in pairs})]
+    lines += [f'  {mid("x_" + x)}(["{mtext(nodes[x]["label"])}"])' for x in sorted(nodes)]
+    lines += [
+        f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid('x_' + x)}"
+        for (a, x), k in sorted(pairs.items())
+    ]
+    lines += ["```", ""]
+    for x, node in sorted(nodes.items()):
+        lines += [f"## {node['label']}", ""]
+        lines += [f"- Hosts: {', '.join(node['hosts']) or 'none recorded'} ({node['source']})"]
+        lines += [
+            f"- {e['from']}: {e['kind']} `{e['key']}` ({e['match']}) ({e.get('evidence')})"
+            for e in edges
+            if e["to"] == x
+        ]
+        lines += [""]
+    return "\n".join(lines)
+
+
 def render_docs(ad, manifests, graph):
     staging = ad / "docs.new"
     if staging.exists():
         shutil.rmtree(staging)
     (staging / "domains").mkdir(parents=True, exist_ok=True)
+
+    shared_labels = {
+        s["name"]: s.get("label") or s["name"]
+        for s in graph["shared_datastores"]
+        if s.get("source") == "override"
+    }
+    ext_out, generic_out = {}, {}
+    for e in graph["external_edges"]:
+        ext_out.setdefault(e["from"], []).append(e)
+    for r in graph["generic"]:
+        generic_out.setdefault(r["repo"], []).append(r)
+
+    def generic_label(r):
+        group = r.get("group")
+        shared = f", shared: {shared_labels[group]}" if group in shared_labels else ""
+        return f"generic ({r['tag']}{shared})"
 
     for name, m in manifests.items():
         meta = m["_meta"]
@@ -2718,7 +2767,14 @@ def render_docs(ad, manifests, graph):
         ] or ["- none found"]
         lines += ["", "## Consumes", ""]
         for c in m.get("consumes", []):
-            targets = [e["to"] for e in out_edges if e["key"] == c.get("key")]
+            key = c.get("key")
+            targets = [e["to"] for e in out_edges if e["key"] == key]
+            targets += [
+                f"external: {graph['external_nodes'][e['to']]['label']}"
+                for e in ext_out.get(name, [])
+                if e["key"] == key
+            ]
+            targets += [generic_label(r) for r in generic_out.get(name, []) if r["key"] == key]
             lines.append(
                 f"- {c.get('kind')} `{c.get('name')}` key `{c.get('key')}` -> "
                 f"{', '.join(targets) or 'unresolved'}: {c.get('detail', '')} ({c.get('evidence')})"
@@ -2759,6 +2815,10 @@ def render_docs(ad, manifests, graph):
             if e["from"] in members_set or e["to"] in members_set:
                 pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
         outsiders = {n for pair in pairs for n in pair} - members_set
+        ext_pairs = {}
+        for e in graph["external_edges"]:
+            if e["from"] in members_set:
+                ext_pairs.setdefault((e["from"], e["to"]), set()).add(e["kind"])
         lines = [
             f"# Domain: {domain}",
             "",
@@ -2772,13 +2832,23 @@ def render_docs(ad, manifests, graph):
             for n in sorted(outsiders)
         ]
         lines += [
+            f'  {mid("x_" + x)}(["{mtext(graph["external_nodes"][x]["label"])}"])'
+            for x in sorted({x for _, x in ext_pairs})
+        ]
+        lines += [
             f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid(b)}"
             for (a, b), k in sorted(pairs.items())
+        ]
+        lines += [
+            f"  {mid(a)} -->|{mtext(', '.join(sorted(k)))}| {mid('x_' + x)}"
+            for (a, x), k in sorted(ext_pairs.items())
         ]
         lines += ["```", ""] + [f"- {n}: {graph['repos'][n]['summary']}" for n in sorted(members)]
         (staging / "domains" / f"{re.sub(r'[^a-z0-9_-]', '_', domain)}.md").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
+
+    (staging / "outbound.md").write_text(outbound_doc(graph), encoding="utf-8")
 
     live, retired = ad / "docs", ad / "docs.old"
     if retired.exists():
@@ -2789,7 +2859,14 @@ def render_docs(ad, manifests, graph):
     if retired.exists():
         shutil.rmtree(retired)
 
-    index = ["# Org atlas", "", f"Generated {graph['generated_at']}. {len(manifests)} repos.", ""]
+    index = [
+        "# Org atlas",
+        "",
+        f"Generated {graph['generated_at']}. {len(manifests)} repos.",
+        "",
+        "Third parties the repos call: [docs/outbound.md](docs/outbound.md)",
+        "",
+    ]
     for domain, members in sorted(by_domain.items()):
         index += (
             [f"## {domain}", ""]

@@ -994,6 +994,66 @@ def test_a_bad_overrides_file_fails_naming_the_file_and_the_problem(make_cfg, bo
     assert str(cfg["resolve_overrides"]) in message and fragment in message
 
 
+def outbound_fixture(cfg, make_manifest):
+    make_manifest(
+        cfg,
+        "client",
+        domain="payments",
+        consumes=[
+            *http_consumer("https://api.vendor.com/v1"),
+            *http_consumer("MONGO_URI"),
+            *http_consumer("MYSTERY_URL"),
+        ],
+    )
+    make_manifest(cfg, "client2", consumes=http_consumer("MONGO_URI"))
+    write_overrides(
+        cfg,
+        [
+            target("MONGO_URI", "client", "generic", tag="mongo", group="shared-mongo"),
+            target("MONGO_URI", "client2", "generic", tag="mongo", group="shared-mongo"),
+        ],
+        groups={"shared-mongo": {"label": "Shared Mongo"}},
+    )
+
+
+def test_outbound_doc_lists_each_third_party_with_its_consumers(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    outbound_fixture(cfg, make_manifest)
+    graph_of(cfg)
+    text = (cfg["atlas_dir"] / "docs" / "outbound.md").read_text()
+    assert "## api.vendor.com" in text
+    assert "client" in text and "https://api.vendor.com/v1" in text
+    assert "```mermaid" in text and "n_x_api_vendor_com" in text
+
+
+def test_outbound_doc_exists_and_says_so_when_there_is_nothing_outbound(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    make_manifest(cfg, "client")
+    graph_of(cfg)
+    assert "No outbound" in (cfg["atlas_dir"] / "docs" / "outbound.md").read_text()
+
+
+def test_consumes_lines_say_where_each_target_went(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    outbound_fixture(cfg, make_manifest)
+    graph_of(cfg)
+    doc = (cfg["atlas_dir"] / "docs" / "client.md").read_text()
+    assert "-> external: api.vendor.com:" in doc
+    assert "-> generic (mongo, shared: Shared Mongo):" in doc
+    assert "-> unresolved:" in doc
+
+
+def test_domain_diagram_and_index_surface_the_externals(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    outbound_fixture(cfg, make_manifest)
+    graph_of(cfg)
+    domain = (cfg["atlas_dir"] / "docs" / "domains" / "payments.md").read_text()
+    assert "n_x_api_vendor_com" in domain and "n_client --" in domain
+    assert "docs/outbound.md" in (cfg["atlas_dir"] / "index.md").read_text()
+
+
 def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
     cfg = make_cfg()
     make_manifest(cfg, "good")

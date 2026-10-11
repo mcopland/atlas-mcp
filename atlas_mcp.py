@@ -108,6 +108,26 @@ def edge_view(e):
     }
 
 
+def external_view(g: dict[str, Any], e: dict[str, Any]) -> dict[str, Any]:
+    node = g.get("external_nodes", {}).get(e["to"], {})
+    return {**edge_view(e), "label": node.get("label", e["to"])}
+
+
+def outbound(g: dict[str, Any], repo: str, kind: str = "") -> dict[str, Any]:
+    """Third parties and generic targets one repo reaches. .get: an atlas built before these
+    sections existed has neither, and must keep answering."""
+    return {
+        "external": [
+            external_view(g, e)
+            for e in g.get("external_edges", [])
+            if e["from"] == repo and (not kind or e["kind"] == kind)
+        ],
+        "generic": [
+            r for r in g.get("generic", []) if r["repo"] == repo and (not kind or r["kind"] == kind)
+        ],
+    }
+
+
 def out(obj):
     """Compact JSON keeps tool results small in the agent's context."""
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
@@ -160,6 +180,7 @@ def get_repo(name: str) -> str:
             "depends_on": [edge_view(e) for e in g["edges"] if e["from"] == repo],
             "used_by": [edge_view(e) for e in g["edges"] if e["to"] == repo],
             "unresolved_consumes": [u for u in g["unresolved"] if u["repo"] == repo],
+            **outbound(g, repo),
             "shared_datastores": [s for s in g["shared_datastores"] if repo in s["repos"]],
         }
     )
@@ -224,7 +245,41 @@ def dependencies(name: str, kind: str = "") -> str:
     unresolved = [
         u for u in g["unresolved"] if u["repo"] == repo and (not kind or u["kind"] == kind)
     ]
-    return out({"repo": repo, "dependencies": edges, "unresolved": unresolved})
+    return out(
+        {"repo": repo, "dependencies": edges, "unresolved": unresolved, **outbound(g, repo, kind)}
+    )
+
+
+@server.tool(annotations=READ_ONLY)
+def external_dependencies(name: str = "") -> str:
+    """Third parties the org's repos call (payment providers, government portals, SaaS APIs,
+    package registries). Pass a repo name for that repo's outbound third parties; omit it for
+    every external with the repos that consume it."""
+    g = store.load()
+    if name:
+        repo, err = resolve(name)
+        if repo is None:
+            return out(err)
+        return out({"repo": repo, "external": outbound(g, repo)["external"]})
+    consumers: dict[str, list[dict[str, Any]]] = {}
+    for e in g.get("external_edges", []):
+        consumers.setdefault(e["to"], []).append(
+            {
+                "repo": e["from"],
+                **{k: e[k] for k in ("kind", "key", "evidence", "match") if e.get(k)},
+            }
+        )
+    rows = [
+        {
+            "id": ext_id,
+            "label": node.get("label", ext_id),
+            "hosts": node.get("hosts", []),
+            "source": node.get("source"),
+            "consumers": consumers.get(ext_id, []),
+        }
+        for ext_id, node in sorted(g.get("external_nodes", {}).items())
+    ]
+    return out({"count": len(rows), "externals": rows})
 
 
 @server.tool(annotations=READ_ONLY)

@@ -14,6 +14,7 @@ KIT = Path(__file__).resolve().parent.parent
 TOOLS = [
     "dependencies",
     "dependents",
+    "external_dependencies",
     "find_path",
     "freshness",
     "get_doc",
