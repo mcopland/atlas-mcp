@@ -529,6 +529,84 @@ def test_an_exact_identifier_still_matches_a_generic_name(make_cfg, make_manifes
     ]
 
 
+def db_consumer(key, kind="database"):
+    return [{"kind": kind, "name": "db", "key": key, "evidence": ev("b.cs")}]
+
+
+@pytest.mark.parametrize(
+    "key", ["Billing", "ConnectionStrings:Billing", "ConnectionStrings__billing"]
+)
+def test_a_named_connection_string_links_to_a_dotted_suffix_provider(
+    make_cfg, make_manifest, graph_of, key
+):
+    cfg = make_cfg()
+    make_manifest(cfg, "orm-billing", identifiers=["Acme.Orm.Billing"])
+    for i in range(5):
+        make_manifest(cfg, f"app-{i}", consumes=db_consumer(key))
+    g = graph_of(cfg)
+    assert sorted((e["from"], e["to"], e["match"]) for e in g["edges"]) == [
+        (f"app-{i}", "orm-billing", "alias") for i in range(5)
+    ]
+    assert g["unresolved"] == []
+
+
+def test_a_dotted_suffix_matches_an_exposed_database_key(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(
+        cfg,
+        "orm-ledger",
+        exposes=[
+            {"kind": "database", "name": "ledger", "key": "Acme.Orm.Ledger", "evidence": ev()}
+        ],
+    )
+    make_manifest(cfg, "app", consumes=db_consumer("Ledger"))
+    assert [(e["to"], e["match"]) for e in graph_of(cfg)["edges"]] == [("orm-ledger", "alias")]
+
+
+def test_a_dotted_suffix_does_not_apply_to_service_consumers(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "orm-billing", identifiers=["Acme.Orm.Billing"])
+    make_manifest(cfg, "app", consumes=db_consumer("Billing", kind="http"))
+    assert graph_of(cfg)["edges"] == []
+
+
+def test_too_many_dotted_suffix_providers_stay_unresolved_with_candidates(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg()
+    for i in range(4):
+        make_manifest(cfg, f"orm-{i}", identifiers=[f"Org{i}.Orm.Billing"])
+    make_manifest(cfg, "app", consumes=db_consumer("Billing"))
+    g = graph_of(cfg)
+    assert g["edges"] == []
+    assert g["unresolved"][0]["candidates"] == [f"orm-{i}" for i in range(4)]
+
+
+def test_a_configured_shared_name_reported_as_an_identifier_makes_no_edge(
+    make_cfg, make_manifest, graph_of
+):
+    cfg = make_cfg(generic_identifiers=["AcmeFeed"])
+    make_manifest(cfg, "one", identifiers=["AcmeFeed"])
+    make_manifest(cfg, "two", identifiers=["AcmeFeed"])
+    make_manifest(
+        cfg,
+        "client",
+        consumes=[{"kind": "http", "name": "feed", "key": "AcmeFeed", "evidence": ev()}],
+    )
+    assert graph_of(cfg)["edges"] == []
+
+
+def test_a_placeholder_identifier_never_forms_an_exact_edge(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "holder", identifiers=["Default"])
+    make_manifest(
+        cfg,
+        "client",
+        consumes=[{"kind": "http", "name": "d", "key": "Default", "evidence": ev()}],
+    )
+    assert graph_of(cfg)["edges"] == []
+
+
 def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
     cfg = make_cfg()
     make_manifest(cfg, "good")

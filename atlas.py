@@ -2092,6 +2092,26 @@ def envvar_forms(raw):
     return forms
 
 
+CONN_KEY_PREFIX = re.compile(r"^(?:connectionstrings[:_]{1,2}|name\s*=\s*)", re.IGNORECASE)
+
+
+def conn_key(raw):
+    """ConnectionStrings:Billing -> 'billing': the name a consumer gives a connection string.
+    Empty when what is left is a URL, host:port or an actual connection string, none of which
+    is a name to look up as the tail of someone's dotted identifier."""
+    s = CONN_KEY_PREFIX.sub("", str(raw).strip()).strip().lower()
+    return "" if not s or re.search(r"[/:;=\s]", s) else s
+
+
+def dotted_suffixes(raw):
+    """Acme.Orm.Billing -> ['orm.billing', 'billing']. A package path or URL is not a dotted name."""
+    s = str(raw or "").strip().lower()
+    if "/" in s or "://" in s or "." not in s:
+        return []
+    parts = s.split(".")
+    return [".".join(parts[i:]) for i in range(1, len(parts)) if parts[i]]
+
+
 def alias_ok(form, stoplist):
     return len(form) >= 3 and form not in stoplist
 
@@ -2166,8 +2186,14 @@ def build(cfg, known):
                 provide("pkg", text, name, "exact")
                 continue
             full, first = svc_forms(text)
+            # The alias stoplist alone leaves a reported "Default" or a shared feed name an exact
+            # match, and several repos report the same one. The repo's own name is always its own.
+            if text.lower() != name.lower() and (text.lower() in stop or full in stop):
+                continue
             provide("svc", full, name, "exact")
             provide("svc", first, name, "alias")
+            for suffix in dotted_suffixes(text):
+                provide("dotted", suffix, name, "alias")
         # A repo's name is often what consumers write for the package it ships (py-sltc ships
         # sltc), but only a guess at it, so it never outranks a declared package name.
         provide("pkg", name, name, "alias")
@@ -2181,6 +2207,9 @@ def build(cfg, known):
                 provide("svc", first, name, "alias")
             elif key:
                 provide(fam, key, name, "exact")
+                if fam in ("db", "other"):
+                    for suffix in dotted_suffixes(key):
+                        provide("dotted", suffix, name, "alias")
         for ds in m.get("datastores") or []:
             store = str(ds.get("name") or "").strip().lower()
             if (
@@ -2250,6 +2279,8 @@ def build(cfg, known):
                     lookups.insert(0, ("other", key, "exact"))
             else:
                 lookups = [(fam, key, "exact")]
+            if fam in ("db", "other") and (named := conn_key(key)):
+                lookups.append(("dotted", named, "alias"))
             lookups += [("svc", f, "envvar") for f in envvar_forms(key)]
             link(name, item, kind, key, lookups)
         for p in (m.get("packages") or {}).get("depends_on", []):
