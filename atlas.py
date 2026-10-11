@@ -3009,7 +3009,7 @@ class StopResolve(Exception):
     """The operator quit or the input ended; every answer given so far is already saved."""
 
 
-RESOLVE_MENU = "  [l]ink to a repo  [e]xternal  [g]eneric  [{}skip  [q]uit > "
+RESOLVE_MENU = "  [l]ink to a repo  [e]xternal  [g]eneric  [{}kip  [q]uit > "
 SPLIT = "split"
 
 
