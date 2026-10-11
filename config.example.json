@@ -20,5 +20,6 @@
   "max_ambiguous_hits": 3,
   "domains": [],
   "repo_domains": {},
-  "generic_identifiers": []
+  "generic_identifiers": [],
+  "internal_domains": []
 }
