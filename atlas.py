@@ -255,6 +255,7 @@ def load_config(path):
         "domains": [],
         "ignore_changes": list(DEFAULT_IGNORE_CHANGES),
         "generic_identifiers": [],
+        "internal_domains": [],
     }
     for k, v in defaults.items():
         cfg.setdefault(k, v)
@@ -295,6 +296,10 @@ def load_config(path):
     cfg["generic_identifiers"] = {
         str(s).strip().lower() for s in cfg["generic_identifiers"]
     } | GENERIC_IDENTIFIERS
+    domains = cfg["internal_domains"]
+    if not isinstance(domains, list) or not all(isinstance(d, str) and d.strip() for d in domains):
+        sys.exit(f"internal_domains must be a list of domain names, got {domains!r}")
+    cfg["internal_domains"] = [re.sub(r"^(?:\*\.|\.)+", "", d.strip().lower()) for d in domains]
     cfg["domains"] = [str(d).strip().lower() for d in cfg["domains"] if str(d).strip()]
     return cfg
 
@@ -2206,6 +2211,32 @@ def dotted_suffixes(raw):
     return [".".join(parts[i:]) for i in range(1, len(parts)) if parts[i]]
 
 
+# Hosts that look like third parties but are placeholders in docs, schemas and samples.
+PLACEHOLDER_HOSTS = (
+    "localhost", "example.com", "example.org", "example.net", "w3.org", "json-schema.org",
+    "schema.org",
+)  # fmt: skip
+INTERNAL_TLDS = {"local", "internal", "svc", "localhost", "lan", "localdomain"}
+HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")
+
+
+def external_host(key, internal_domains):
+    """The host of a consume that is evidence of a third party, else "". Only a fully qualified
+    name outside every internal domain counts: an env-var name or bare word names no host, and
+    with no internal_domains configured nothing can be called outside."""
+    if not internal_domains or ENV_NAME.fullmatch(str(key).strip()):
+        return ""
+    host = svc_forms(key)[0]
+    if not HOST_NAME.fullmatch(host):
+        return ""
+    tld = host.rsplit(".", 1)[1]
+    if not tld.isalpha() or tld in INTERNAL_TLDS:  # isalpha also rules out an IP address
+        return ""
+    if any(host == d or host.endswith("." + d) for d in (*internal_domains, *PLACEHOLDER_HOSTS)):
+        return ""
+    return host
+
+
 def alias_ok(form, stoplist):
     return len(form) >= 3 and form not in stoplist
 
@@ -2322,6 +2353,8 @@ def build(cfg, known):
             provide("pkg", p["name"], name, "alias")
 
     edges, unresolved, seen = [], [], set()
+    external_nodes, external_edges = {}, []
+    buckets = {"internal": 0, "external": 0, "generic": 0, "unknown": 0}
 
     def link(src, item, kind, key, lookups):
         hits = {}
@@ -2336,7 +2369,36 @@ def build(cfg, known):
                 break
         weakest = max((RANK[v] for v in hits.values()), default=0)
         fan_in = FAMILY.get(kind) == "msg" and weakest == 0  # one topic, many producers
+        # Only a target nothing internal even partly matched: a shortlist of weak candidates means
+        # the name may well be ours, and guessing "third party" there would hide a real edge.
+        host = (
+            external_host(key, cfg["internal_domains"])
+            if not hits and FAMILY.get(kind, "other") in ("svc", "other")
+            else ""
+        )
+        if host:
+            external_nodes.setdefault(
+                host, {"label": host, "kind": "external", "hosts": [host], "source": "derived"}
+            )
+            sig = (src, host, kind, key)
+            if sig not in seen:
+                seen.add(sig)
+                external_edges.append(
+                    {
+                        "from": src,
+                        "to": host,
+                        "kind": kind,
+                        "key": key,
+                        "name": item.get("name", key),
+                        "detail": item.get("detail", ""),
+                        "evidence": item.get("evidence"),
+                        "match": "derived",
+                    }
+                )
+            buckets["external"] += 1
+            return
         if not hits or (not fan_in and len(hits) > cfg["max_ambiguous_hits"]):
+            buckets["unknown"] += 1
             row = {
                 "repo": src,
                 "kind": kind,
@@ -2348,6 +2410,7 @@ def build(cfg, known):
                 row["candidates"] = sorted(hits)
             unresolved.append(row)
             return
+        buckets["internal"] += 1
         for dst, strength in hits.items():
             sig = (src, dst, kind, key)
             if sig in seen:
@@ -2435,6 +2498,9 @@ def build(cfg, known):
         "edges": edges,
         "unresolved": unresolved,
         "shared_datastores": shared,
+        "external_nodes": dict(sorted(external_nodes.items())),
+        "external_edges": external_edges,
+        "resolution": {**buckets, "stale_overrides": []},
     }
     render_docs(ad, manifests, graph)
     write_json(ad / "graph.json", graph)  # published last: docs it points at already exist
@@ -2442,6 +2508,8 @@ def build(cfg, known):
         f"graph: {len(manifests)} repos, {len(edges)} edges, {len(unresolved)} unresolved, "
         f"{len(shared)} shared datastores -> {ad / 'graph.json'}"
     )
+    print("targets: " + ", ".join(f"{n} {b}" for b, n in buckets.items()))
+    return graph
 
 
 # ---------- docs ----------

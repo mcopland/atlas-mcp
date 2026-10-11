@@ -73,6 +73,19 @@ def test_load_config_rejects_a_non_positive_int_numeric_key(make_cfg, key, value
     assert key in str(e.value)
 
 
+@pytest.mark.parametrize("value", ["corp.example", [1], [""], None, {"a": 1}])
+def test_load_config_rejects_internal_domains_that_are_not_a_list_of_names(make_cfg, value):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(internal_domains=value)
+    assert "internal_domains" in str(e.value)
+
+
+def test_internal_domains_are_normalised(make_cfg):
+    cfg = make_cfg(internal_domains=[" *.Corp.Example ", ".corp.net"])
+    assert cfg["internal_domains"] == ["corp.example", "corp.net"]
+    assert make_cfg()["internal_domains"] == []
+
+
 def test_config_extends_the_generic_identifier_stoplist(make_cfg):
     cfg = make_cfg(generic_identifiers=["Orders"])
     assert "orders" in cfg["generic_identifiers"]

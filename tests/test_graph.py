@@ -672,6 +672,104 @@ def test_a_generic_env_var_is_never_linked_by_name(make_cfg, make_manifest, grap
     assert [u["key"] for u in g["unresolved"]] == ["MONGO_URI"]
 
 
+def http_consumer(key, name="call"):
+    return [{"kind": "http", "name": name, "key": key, "evidence": ev("b.py")}]
+
+
+def test_an_outside_fqdn_becomes_an_external_node_and_edge(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "client", consumes=http_consumer("https://api.vendor.com/v1/x"))
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {
+        "api.vendor.com": {
+            "label": "api.vendor.com",
+            "kind": "external",
+            "hosts": ["api.vendor.com"],
+            "source": "derived",
+        }
+    }
+    assert [(e["from"], e["to"], e["kind"], e["match"]) for e in g["external_edges"]] == [
+        ("client", "api.vendor.com", "http", "derived")
+    ]
+    assert g["edges"] == [] and g["unresolved"] == []
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "https://orders.corp.example/v1",
+        "https://corp.example",
+        "http://localhost:8080",
+        "http://10.1.2.3/x",
+        "http://orders.default.svc.cluster.local",
+        "http://thing.internal",
+        "https://example.com",
+        "https://{host}.vendor.com",
+        "VENDOR_API_URL",
+        "vendor",
+    ],
+)
+def test_only_an_evidence_backed_outside_fqdn_is_derived_as_external(
+    make_cfg, make_manifest, graph_of, key
+):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "client", consumes=http_consumer(key))
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {} and g["external_edges"] == []
+    assert [u["key"] for u in g["unresolved"]] == [key]
+
+
+def test_nothing_is_derived_as_external_without_internal_domains(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg()
+    make_manifest(cfg, "client", consumes=http_consumer("https://api.vendor.com/v1"))
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {}
+    assert [u["key"] for u in g["unresolved"]] == ["https://api.vendor.com/v1"]
+
+
+def test_an_ambiguous_target_is_never_derived_as_external(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    for i in range(4):
+        make_manifest(cfg, f"orders-{i}", identifiers=["orders"])
+    make_manifest(cfg, "client", consumes=http_consumer("https://orders.vendor.com"))
+    g = graph_of(cfg)
+    assert g["external_nodes"] == {}
+    assert g["unresolved"][0]["candidates"]
+
+
+def test_an_internal_match_wins_over_an_external_guess(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "billing", identifiers=["billing.vendor.com"])
+    make_manifest(cfg, "client", consumes=http_consumer("https://billing.vendor.com"))
+    g = graph_of(cfg)
+    assert [e["to"] for e in g["edges"]] == ["billing"]
+    assert g["external_nodes"] == {}
+
+
+def test_every_target_lands_in_exactly_one_bucket(make_cfg, make_manifest, graph_of):
+    cfg = make_cfg(internal_domains=["corp.example"])
+    make_manifest(cfg, "orders-service")
+    make_manifest(
+        cfg,
+        "client",
+        consumes=[
+            *http_consumer("ORDERS_SERVICE_URL"),
+            *http_consumer("https://api.vendor.com"),
+            *http_consumer("https://api.other.com"),
+            *http_consumer("MYSTERY_URL"),
+        ],
+    )
+    g = graph_of(cfg)
+    assert g["resolution"] == {
+        "internal": 1,
+        "external": 2,
+        "generic": 0,
+        "unknown": 1,
+        "stale_overrides": [],
+    }
+    assert sum(g["resolution"][b] for b in ("internal", "external", "generic", "unknown")) == 4
+
+
 def test_manifest_missing_other_meta_fields_is_skipped(make_cfg, make_manifest, graph_of, capsys):
     cfg = make_cfg()
     make_manifest(cfg, "good")
