@@ -157,8 +157,9 @@ def list_repos(domain: str = "", kind: str = "") -> str:
 @server.tool(annotations=READ_ONLY)
 def get_repo(name: str) -> str:
     """Full atlas entry for one repo: purpose, overview, what it exposes and consumes (with evidence
-    file paths), datastores, components, resolved dependencies and dependents, source commit, local
-    path, and markdown doc path. Accepts a repo name or any identifier (service name, hostname, package)."""
+    file paths), datastores, components, resolved dependencies and dependents, third parties it
+    calls (external), tagged shared-infrastructure targets (generic, shared_datastores), source
+    commit, local path, and markdown doc path. Accepts a repo name or any identifier (service name, hostname, package)."""
     repo, err = resolve(name)
     if repo is None:
         return out(err)
@@ -233,8 +234,9 @@ def impact(name: str, max_hops: int = 3, kind: str = "") -> str:
 
 @server.tool(annotations=READ_ONLY)
 def dependencies(name: str, kind: str = "") -> str:
-    """What this repo depends on, plus consumes that could not be matched to any known repo (unresolved,
-    often external services or env vars). Optional kind filter."""
+    """What this repo depends on, plus consumes that matched no known repo (unresolved, often env
+    vars), the third parties it calls (external) and tagged shared-infrastructure targets
+    (generic). Optional kind filter."""
     repo, err = resolve(name)
     if repo is None:
         return out(err)
