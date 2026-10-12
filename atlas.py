@@ -6,7 +6,7 @@
 """Org atlas: map every repo with Kiro CLI, join the results into one graph, render docs.
 
   atlas.py generate [--only NAME ...] [--limit N] [--full] [--pull] [--dry-run] [--no-build]
-                    [--force-unlock]
+                    [-v] [--force-unlock]
   atlas.py build
   atlas.py prune [--apply]
   atlas.py unresolved [--top N]
@@ -20,6 +20,7 @@ Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
   resolve_overrides.json  human answers from `resolve`, applied by every build
   docs/<name>.md      per-repo doc with component diagram
   docs/domains/*.md   per-domain HLD diagram
+  docs/outbound.md    third parties the repos call
   index.md            one line per repo
   logs/<name>.log     Kiro output, one section per attempt
 """
