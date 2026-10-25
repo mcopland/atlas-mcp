@@ -3323,6 +3323,21 @@ RESOLVE_MENU = "  [l]ink to a repo  [e]xternal  [g]eneric  [{}kip  [q]uit > "
 SPLIT = "split"
 
 
+def describe_suggestion(d):
+    action = d.get("action")
+    what = {
+        "link": f"link -> {d.get('to')}",
+        "external": f"external -> {d.get('external')} ({d.get('label')})",
+        "generic": f"generic, tag {d.get('tag')}",
+    }.get(action, str(action))
+    text = f"{what} ({d.get('confidence', 'low')})"
+    if d.get("reason"):
+        text += f" - {d['reason']}"
+    if d.get("basis"):
+        text += f" [basis: {d['basis']}]"
+    return text
+
+
 def cmd_resolve(cfg, args, ask=input, say=print):
     """Walk the targets no rule could place and record a human answer for each, keyed by
     (target, consuming repo). The answers go to resolve_overrides.json after every question, so
@@ -3330,11 +3345,37 @@ def cmd_resolve(cfg, args, ask=input, say=print):
     path = cfg["resolve_overrides"]
     with atlas_lock(cfg["atlas_dir"]):  # not held while prompting: generate may run meanwhile
         graph = build(cfg, known_repo_names(cfg))
-    rows = unresolved_targets(graph, args.top)
-    if not rows:
-        say("nothing to resolve: no unresolved targets")
-        return
     repo_names = {n.lower(): n for n in graph["repos"]}
+    drafts = load_suggestions(suggestions_path(cfg))
+    phash = resolver_prompt_hash()
+
+    def current(t):
+        """The drafted answer for t, unless what it was drafted from has changed since."""
+        d = drafts.get(t["key"].lower())
+        return d if d and d.get("fingerprint") == target_fingerprint(t, phash) else None
+
+    def acceptable(t, d):
+        """Whether Enter may take d as it stands: the file is checked again, because a repo
+        can be renamed, and the file edited by hand, after `suggest` wrote it."""
+        action = (d or {}).get("action")
+        if action == "link":
+            to = repo_names.get(str(d.get("to", "")).lower())
+            return bool(to) and not set(t["consumers"]) <= {to}
+        if action in ("external", "generic"):
+            return bool(REPO_NAME.fullmatch(str(d.get(OVERRIDE_ACTIONS[action], ""))))
+        return False
+
+    rows = unresolved_targets(graph)
+    if args.suggested:
+        rows = [t for t in rows if acceptable(t, current(t))]
+    rows = rows[: args.top] if args.top else rows
+    if not rows:
+        say(
+            "nothing to resolve: no current suggestions"
+            if args.suggested
+            else "nothing to resolve: no unresolved targets"
+        )
+        return
 
     def prompt(text):
         try:
@@ -3388,12 +3429,42 @@ def cmd_resolve(cfg, args, ask=input, say=print):
                 continue
             return name
 
-    def decide(t, consumers, candidates, may_split):
-        """(entries, definitions) for these consumers, SPLIT to answer them one by one, or None."""
+    def link(key, consumers, to):
+        return [
+            {"key": key, "repo": r, "action": "link", "to": to}
+            for r in consumers
+            if r != to  # the owner itself keeps the target; the rest depend on it
+        ], {}
+
+    def external(key, consumers, ext, label):
+        """`label` is called only for an id not defined yet, so it can prompt."""
+        defs = {}
+        if ext not in read_doc().get("externals", {}):
+            defs = {"externals": {ext: {"label": label() or ext, "hosts": []}}}
+        return [
+            {"key": key, "repo": r, "action": "external", "external": ext} for r in consumers
+        ], defs
+
+    def accept(key, consumers, d):
+        if d["action"] == "link":
+            return link(key, consumers, repo_names[d["to"].lower()])
+        if d["action"] == "external":
+            return external(key, consumers, d["external"], lambda: d.get("label"))
+        return [
+            {"key": key, "repo": r, "action": "generic", "tag": d["tag"].lower()} for r in consumers
+        ], {}
+
+    def decide(t, consumers, candidates, may_split, offer=None):
+        """(entries, definitions) for these consumers, SPLIT to answer them one by one, or None.
+        `offer`, a drafted answer, is what a blank choice accepts."""
         key = t["key"]
         menu = RESOLVE_MENU.format("p]er consumer  [s]" if may_split else "s]")
+        if offer:
+            menu = "  [enter] accept" + menu
         while True:
             choice = prompt(menu).lower()[:1]
+            if not choice and offer:
+                return accept(key, consumers, offer)
             if choice == "q":
                 raise StopResolve
             if choice == "s":
@@ -3402,25 +3473,13 @@ def cmd_resolve(cfg, args, ask=input, say=print):
                 return SPLIT
             if choice == "l":
                 if to := ask_repo(consumers, candidates):
-                    return [
-                        {"key": key, "repo": r, "action": "link", "to": to}
-                        for r in consumers
-                        if r != to  # the owner itself keeps the target; the rest depend on it
-                    ], {}
+                    return link(key, consumers, to)
             elif choice == "e":
-                doc = read_doc()
-                defined = doc.get("externals", {})
+                defined = read_doc().get("externals", {})
                 if listed := sorted({*graph["external_nodes"], *defined}):
                     say(f"  known externals: {', '.join(listed)}")
                 ext = ask_name("external id")
-                defs = {}
-                if ext not in defined:
-                    label = prompt("  label (blank = the id) > ") or ext
-                    defs = {"externals": {ext: {"label": label, "hosts": []}}}
-                return [
-                    {"key": key, "repo": r, "action": "external", "external": ext}
-                    for r in consumers
-                ], defs
+                return external(key, consumers, ext, lambda: prompt("  label (blank = the id) > "))
             elif choice == "g":
                 tag = ask_name("tag (the kind of store, e.g. mongo)").lower()
                 while True:
@@ -3464,7 +3523,11 @@ def cmd_resolve(cfg, args, ask=input, say=print):
                 say(f"  ... and {len(consumers) - 6} more")
             if candidates:
                 say("  candidates: " + "  ".join(f"{i}) {c}" for i, c in enumerate(candidates, 1)))
-            outcome = decide(t, consumers, candidates, len(consumers) > 1)
+            draft = current(t)
+            if draft:
+                say(f"  suggested: {describe_suggestion(draft)}")
+            offer = draft if acceptable(t, draft) else None
+            outcome = decide(t, consumers, candidates, len(consumers) > 1, offer)
             if outcome == SPLIT:
                 for repo in consumers:
                     row = t["consumers"][repo]
@@ -3563,6 +3626,9 @@ def main():
     sg.add_argument("-v", "--verbose", action="store_true", help="list every dropped answer")
     r = sub.add_parser("resolve")
     r.add_argument("--top", type=positive_int, help="only the N targets with the most consumers")
+    r.add_argument(
+        "--suggested", action="store_true", help="only targets with a suggestion to accept"
+    )
     sub.add_parser("status")
     args = ap.parse_args()
     cfg = load_config(args.config)

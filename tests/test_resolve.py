@@ -29,8 +29,9 @@ class Session:
         return "\n".join(self.said)
 
 
-def run(cfg, session, top=None):
-    atlas.cmd_resolve(cfg, argparse.Namespace(top=top), ask=session.ask, say=session.say)
+def run(cfg, session, top=None, suggested=False):
+    ns = argparse.Namespace(top=top, suggested=suggested)
+    atlas.cmd_resolve(cfg, ns, ask=session.ask, say=session.say)
     return json.loads((cfg["atlas_dir"] / "graph.json").read_text())
 
 
@@ -198,11 +199,13 @@ def test_unresolved_targets_group_by_key_and_put_the_most_shared_first(world, gr
 def test_main_dispatches_resolve(make_cfg, tmp_path, monkeypatch):
     make_cfg()
     seen = {}
-    monkeypatch.setattr(atlas, "cmd_resolve", lambda cfg, args: seen.update(top=args.top))
+    monkeypatch.setattr(
+        atlas, "cmd_resolve", lambda cfg, args: seen.update(top=args.top, sug=args.suggested)
+    )
     argv = ["atlas.py", "--config", str(tmp_path / "config.json"), "resolve", "--top", "3"]
-    monkeypatch.setattr("sys.argv", argv)
+    monkeypatch.setattr("sys.argv", [*argv, "--suggested"])
     atlas.main()
-    assert seen == {"top": 3}
+    assert seen == {"top": 3, "sug": True}
 
 
 def test_linking_a_shared_target_to_one_consumer_links_the_others(world):
@@ -239,5 +242,150 @@ def test_a_file_corrupted_mid_session_stops_with_its_path(world):
         return session.ask(prompt)
 
     with pytest.raises(SystemExit) as e:
-        atlas.cmd_resolve(cfg, argparse.Namespace(top=None), ask=ask, say=session.say)
+        atlas.cmd_resolve(
+            cfg, argparse.Namespace(top=None, suggested=False), ask=ask, say=session.say
+        )
     assert str(cfg["resolve_overrides"]) in str(e.value)
+
+
+def suggest(cfg, graph_of, key, fingerprint=None, **answer):
+    """Store a drafted answer for `key` the way `suggest` would, current unless told otherwise."""
+    t = next(t for t in atlas.unresolved_targets(graph_of(cfg)) if t["key"] == key)
+    path = atlas.suggestions_path(cfg)
+    found = atlas.load_suggestions(path)
+    found[key.lower()] = {
+        "key": key,
+        "confidence": "high",
+        "reason": "it fits",
+        "basis": "orders.internal",
+        **answer,
+        "fingerprint": fingerprint or atlas.target_fingerprint(t, atlas.resolver_prompt_hash()),
+    }
+    atlas.write_suggestions(path, found)
+
+
+def test_enter_accepts_a_suggested_link(world, graph_of):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", action="link", to="orders-svc")
+    s = Session("")
+    g = run(cfg, s)
+    assert "suggested: link -> orders-svc (high) - it fits [basis: orders.internal]" in s.out
+    assert "[enter] accept" in s.prompts[0]
+    assert saved(cfg)["targets"] == [
+        {"key": "ORDERS_BACKEND", "repo": "client", "action": "link", "to": "orders-svc"}
+    ]
+    assert g["unresolved"] == []
+
+
+def test_enter_accepts_a_suggested_external_and_defines_it(world, graph_of):
+    cfg = world({"a": consume("WORKLOG_API_URL")})
+    suggest(
+        cfg, graph_of, "WORKLOG_API_URL", action="external", external="worklog", label="Worklog"
+    )
+    g = run(cfg, Session(""))
+    doc = saved(cfg)
+    assert doc["externals"]["worklog"]["label"] == "Worklog"
+    assert doc["targets"] == [
+        {"key": "WORKLOG_API_URL", "repo": "a", "action": "external", "external": "worklog"}
+    ]
+    assert g["external_nodes"]["worklog"]["label"] == "Worklog"
+
+
+def test_accepting_an_external_that_exists_keeps_its_definition(world, graph_of):
+    cfg = world({"a": consume("WORKLOG_API_URL")})
+    atlas.write_json(
+        cfg["resolve_overrides"],
+        {"version": 1, "externals": {"worklog": {"label": "Mine", "hosts": []}}},
+    )
+    suggest(cfg, graph_of, "WORKLOG_API_URL", action="external", external="worklog", label="Theirs")
+    run(cfg, Session(""))
+    assert saved(cfg)["externals"]["worklog"]["label"] == "Mine"
+
+
+def test_enter_accepts_a_suggested_generic_and_keeps_consumers_separate(world, graph_of):
+    cfg = world({n: consume("MONGO_URI") for n in "ab"})
+    suggest(cfg, graph_of, "MONGO_URI", action="generic", tag="mongo")
+    g = run(cfg, Session(""))
+    assert {(t["repo"], t["tag"]) for t in saved(cfg)["targets"]} == {
+        ("a", "mongo"),
+        ("b", "mongo"),
+    }
+    assert all("group" not in t for t in saved(cfg)["targets"])
+    assert len(g["generic"]) == 2 and g["shared_datastores"] == []
+
+
+def test_a_stale_suggestion_is_not_offered(world, graph_of):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", fingerprint="stale", action="link", to="orders-svc")
+    s = Session("")
+    run(cfg, s)
+    assert "suggested" not in s.out
+    assert "'' is not a choice" in s.out
+    assert not cfg["resolve_overrides"].exists()
+
+
+def test_a_manual_choice_overrides_the_suggestion(world, graph_of):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", action="link", to="orders-svc")
+    run(cfg, Session("e", "vendor", "Vendor"))
+    assert [t["action"] for t in saved(cfg)["targets"]] == ["external"]
+
+
+def test_a_none_suggestion_is_shown_but_enter_does_not_accept_it(world, graph_of):
+    cfg = world({"client": consume("MYSTERY_URL")})
+    suggest(cfg, graph_of, "MYSTERY_URL", action="none", reason="nothing fits")
+    s = Session("")
+    run(cfg, s)
+    assert "suggested: none (high) - nothing fits" in s.out
+    assert "[enter] accept" not in s.prompts[0]
+    assert not cfg["resolve_overrides"].exists()
+
+
+def test_a_suggested_link_whose_repo_is_gone_is_not_offered(world, graph_of):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", action="link", to="retired-svc")
+    s = Session("")
+    run(cfg, s)
+    assert "[enter] accept" not in s.prompts[0]
+    assert not cfg["resolve_overrides"].exists()
+
+
+def test_per_consumer_answers_do_not_offer_the_suggestion(world, graph_of):
+    cfg = world({n: consume("MONGO_URI") for n in "ab"})
+    suggest(cfg, graph_of, "MONGO_URI", action="generic", tag="mongo")
+    s = Session("p", "s", "s")
+    run(cfg, s)
+    assert "[enter] accept" in s.prompts[0]
+    assert all("[enter] accept" not in p for p in s.prompts[1:])
+
+
+def test_suggested_walks_only_targets_with_an_answer_to_accept(world, graph_of):
+    cfg = world(
+        {
+            "orders-svc": [],
+            "client": consume("ORDERS_BACKEND") + consume("OTHER_URL"),
+            "other": consume("OTHER_URL") + consume("MYSTERY_URL"),
+        }
+    )
+    suggest(cfg, graph_of, "ORDERS_BACKEND", action="link", to="orders-svc")
+    suggest(cfg, graph_of, "MYSTERY_URL", action="none")
+    s = Session("")
+    run(cfg, s, suggested=True)
+    assert "ORDERS_BACKEND" in s.out
+    assert "OTHER_URL" not in s.out and "MYSTERY_URL" not in s.out
+    assert len(saved(cfg)["targets"]) == 1
+
+
+def test_suggested_with_nothing_to_accept_says_so(world):
+    cfg = world({"client": consume("MYSTERY_URL")})
+    s = Session()
+    run(cfg, s, suggested=True)
+    assert "nothing to resolve: no current suggestions" in s.out
+
+
+def test_a_malformed_suggestions_file_stops_resolve_with_its_path(world):
+    cfg = world({"client": consume("MYSTERY_URL")})
+    atlas.suggestions_path(cfg).write_text("[]")
+    with pytest.raises(SystemExit) as e:
+        run(cfg, Session())
+    assert str(atlas.suggestions_path(cfg)) in str(e.value)
