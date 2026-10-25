@@ -47,6 +47,25 @@ def test_load_config_defaults_the_bundle_budget(make_cfg):
     assert make_cfg()["bundle_budget_bytes"] == 400 * 1024
 
 
+def test_load_config_defaults_the_resolver_settings(make_cfg):
+    cfg = make_cfg(model="m1")
+    assert (cfg["resolver_model"], cfg["resolver_budget_bytes"]) == ("m1", 200 * 1024)
+
+
+@pytest.mark.parametrize("value", [0, -1, "200k", None])
+def test_load_config_rejects_a_resolver_budget_that_is_not_a_positive_int(make_cfg, value):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(resolver_budget_bytes=value)
+    assert "resolver_budget_bytes" in str(e.value)
+
+
+@pytest.mark.parametrize("value", ["", "  ", 3, ["m"]])
+def test_load_config_rejects_a_resolver_model_that_is_not_a_name(make_cfg, value):
+    with pytest.raises(SystemExit) as e:
+        make_cfg(resolver_model=value)
+    assert "resolver_model" in str(e.value)
+
+
 @pytest.mark.parametrize("value", [0, -1, "400k", None])
 def test_load_config_rejects_a_bundle_budget_that_is_not_a_positive_int(make_cfg, value):
     with pytest.raises(SystemExit) as e:

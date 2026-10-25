@@ -76,8 +76,9 @@ def test_the_repo_no_longer_ships_the_atlas_steering_file():
     assert not (AGENTS.parent / "steering" / "atlas.md").exists()
 
 
-def test_the_bundle_mapper_has_no_tools_and_denies_everything():
-    agent = load("atlas-bundle")
+@pytest.mark.parametrize("name", ["atlas-bundle", "atlas-resolver"])
+def test_the_tool_free_agents_have_no_tools_and_deny_everything(name):
+    agent = load(name)
     assert agent["tools"] == []
     assert agent["allowedTools"] == []
     assert agent["includeMcpJson"] is False

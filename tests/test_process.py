@@ -327,6 +327,18 @@ def test_a_model_override_replaces_the_configured_model(make_cfg, monkeypatch, t
     assert cmd[cmd.index("--model") + 1] == "large"
 
 
+@pytest.mark.parametrize("kiro_agent", [None, "", "custom"])
+def test_the_resolver_always_runs_its_own_agent_outside_any_repo(
+    make_cfg, monkeypatch, tmp_path, kiro_agent
+):
+    cfg = make_cfg(kiro_agent=kiro_agent)
+    seen = _spy_popen(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path / "elsewhere", "p", tmp_path / "logs" / "r.log", "resolver")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--agent") + 1] == "atlas-resolver"
+    assert seen["kwargs"]["cwd"] == cfg["atlas_dir"]
+
+
 def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg(kiro_agent="")
     seen = _spy_popen(monkeypatch)

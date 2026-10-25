@@ -1,0 +1,20 @@
+{
+  "name": "atlas-resolver",
+  "description": "Tool-free agent used by atlas.py suggest to draft answers for unresolved targets from a prepared repo directory. It reads nothing and runs nothing.",
+  "tools": [],
+  "allowedTools": [],
+  "permissions": {
+    "rules": [
+      {
+        "capability": "all",
+        "match": [
+          "*"
+        ],
+        "effect": "deny"
+      }
+    ]
+  },
+  "includeMcpJson": false,
+  "mcpServers": {},
+  "resources": []
+}

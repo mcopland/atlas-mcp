@@ -118,3 +118,21 @@ def graph_of(make_cfg):
         return json.loads((cfg["atlas_dir"] / "graph.json").read_text())
 
     return build
+
+
+def consume(key, kind="other"):
+    return [{"kind": kind, "name": key, "key": key, "evidence": "a.py:1"}]
+
+
+@pytest.fixture
+def world(make_repo, make_cfg, make_manifest):
+    """Repos exist as clones (discovery needs them) and as manifests (the graph needs them)."""
+
+    def build(repos, **cfg_overrides):
+        cfg = make_cfg(**cfg_overrides)
+        for name, consumes in repos.items():
+            make_repo(name)
+            make_manifest(cfg, name, consumes=consumes)
+        return cfg
+
+    return build

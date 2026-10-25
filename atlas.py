@@ -10,7 +10,8 @@
   atlas.py build
   atlas.py prune [--apply]
   atlas.py unresolved [--top N]
-  atlas.py resolve [--top N]
+  atlas.py suggest [--top N] [--all] [--dry-run] [-v]
+  atlas.py resolve [--top N] [--suggested]
   atlas.py status
 
 Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
@@ -18,11 +19,12 @@ Nothing is written to the repos. Output goes to atlas_dir (default ~/atlas):
   repos.json          resolved repo name -> path map from the last run
   graph.json          joined cross-repo graph (read by atlas_mcp.py)
   resolve_overrides.json  human answers from `resolve`, applied by every build
+  resolve_suggestions.json  drafted answers from `suggest`, offered by `resolve`
   docs/<name>.md      per-repo doc with component diagram
   docs/domains/*.md   per-domain HLD diagram
   docs/outbound.md    third parties the repos call
   index.md            one line per repo
-  logs/<name>.log     Kiro output, one section per attempt
+  logs/<name>.log     Kiro output, one section per attempt (logs/_resolver.log for suggest)
 """
 
 import argparse
@@ -145,7 +147,9 @@ MAX_UPDATE_PROMPT_BYTES = 96 * 1024
 DEFAULT_BUNDLE_BUDGET_BYTES = 400 * 1024
 TEXT_KEYS = {"text", "content", "delta", "message", "output", "value", "chunk"}
 PROMPTS = {"explore": ("full.md", "update.md"), "bundle": ("bundle_full.md", "bundle_update.md")}
-DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle"}
+DEFAULT_AGENTS = {"explore": "atlas-mapper", "bundle": "atlas-bundle", "resolver": "atlas-resolver"}
+RESOLVER_PROMPT = "resolve_suggest.md"
+DEFAULT_RESOLVER_BUDGET_BYTES = 200 * 1024
 BUNDLE_MARGIN_BYTES = 2 * 1024
 REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SECRET_ASSIGNMENT = re.compile(
@@ -248,6 +252,7 @@ def load_config(path):
         "kiro_extra_args": [],
         "mapper_mode": "bundle",
         "bundle_budget_bytes": DEFAULT_BUNDLE_BUDGET_BYTES,
+        "resolver_budget_bytes": DEFAULT_RESOLVER_BUDGET_BYTES,
         "explore_repos": [],
         "repo_domains": {},
         "parallel": 3,
@@ -271,6 +276,7 @@ def load_config(path):
     # as a per-repo failure far from this config load rather than a clear message at startup.
     for key in (
         "bundle_budget_bytes",
+        "resolver_budget_bytes",
         "parallel",
         "timeout_minutes",
         "full_regen_days",
@@ -294,6 +300,9 @@ def load_config(path):
                 f"repo_names[{clone!r}] = {name!r} is not a plain name; use letters, digits, "
                 "'.', '_' and '-', starting with a letter or digit"
             )
+    cfg.setdefault("resolver_model", cfg["model"])
+    if not isinstance(cfg["resolver_model"], str) or not cfg["resolver_model"].strip():
+        sys.exit(f"resolver_model must be a model id, got {cfg['resolver_model']!r}")
     # None means "pick the agent that matches each repo's mapper mode"; "" means "pass no --agent".
     cfg.setdefault("kiro_agent", None)
     cfg["generic_identifiers"] = {
@@ -1885,11 +1894,14 @@ def rotate_log(log_path):
 
 
 def run_kiro(cfg, repo, prompt, log_path, mapper="explore", model=None):
-    name = cfg["kiro_agent"] if cfg["kiro_agent"] is not None else DEFAULT_AGENTS[mapper]
+    # kiro_agent overrides the mapper agents only: the resolver must stay tool-free whatever
+    # agent the mappers were pointed at.
+    custom = cfg["kiro_agent"] is not None and mapper != "resolver"
+    name = cfg["kiro_agent"] if custom else DEFAULT_AGENTS[mapper]
     agent = ["--agent", name] if name else []
-    # Bundle mode has already read the repo, so it runs outside it: a session started inside a
-    # repo loads that repo's steering, hooks and MCP servers unattended.
-    cwd = cfg["atlas_dir"] if mapper == "bundle" else repo
+    # Only explore mode reads the repo itself; the rest run outside it, because a session
+    # started inside a repo loads that repo's steering, hooks and MCP servers unattended.
+    cwd = repo if mapper == "explore" else cfg["atlas_dir"]
     Path(cwd).mkdir(parents=True, exist_ok=True)
     cmd = [
         cfg["kiro_bin"],
@@ -3037,6 +3049,272 @@ def unresolved_targets(graph, top=None):
     return rows[:top] if top else rows
 
 
+SUGGEST_ACTIONS = (*OVERRIDE_ACTIONS, "none")
+CONFIDENCES = ("high", "medium", "low")
+REPO_ENTRY_BYTES = 1200
+CONSUMERS_SHOWN = 10
+
+
+def suggestions_path(cfg):
+    return cfg["atlas_dir"] / "resolve_suggestions.json"
+
+
+def load_suggestions(path):
+    """Drafted answers from `suggest`, keyed by lowercased target. A malformed file stops the
+    run instead of being overwritten, since it may hold answers nobody has reviewed yet."""
+
+    def bad(problem):
+        sys.exit(f"invalid resolve suggestions {path}: {problem}")
+
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        return bad(e)
+    found = doc.get("suggestions", {}) if isinstance(doc, dict) else None
+    if not isinstance(found, dict) or not all(isinstance(v, dict) for v in found.values()):
+        bad("expected an object whose 'suggestions' maps each target to an object")
+    return found
+
+
+def write_suggestions(path, suggestions):
+    write_json(path, {"version": 1, "suggestions": dict(sorted(suggestions.items()))})
+
+
+def resolver_prompt_hash():
+    return hashlib.sha256((KIT / "prompts" / RESOLVER_PROMPT).read_bytes()).hexdigest()[:12]
+
+
+def target_fingerprint(t, phash):
+    """What a suggestion was drafted from: a new consumer, candidate or prompt asks again."""
+    basis = [t["key"].lower(), sorted(t["consumers"]), sorted(t["candidates"]), phash]
+    return hashlib.sha256(json.dumps(basis).encode("utf-8")).hexdigest()[:12]
+
+
+def clip(text, limit):
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[: max(0, limit - 4)].decode("utf-8", "ignore") + " ..."
+
+
+def repo_directory(cfg, graph, budget):
+    """One entry per repo, each cut to an even share of `budget` so a large org still fits."""
+    names = sorted(graph["repos"])
+    share = min(REPO_ENTRY_BYTES, budget // max(1, len(names)))
+    entries = []
+    for n in names:
+        r = graph["repos"][n]
+        path = cfg["atlas_dir"] / "repos" / f"{n}.json"
+        try:
+            m = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:  # replaced since build() read it
+            print(
+                f"warn: directory entry for {n} lacks what it provides: {path}: {e}",
+                file=sys.stderr,
+            )
+            m = {}
+        provides = [
+            f"{i.get('kind', '')}:{i.get('key', '')}"
+            for field in ("exposes", "datastores")
+            for i in m.get(field, [])
+        ] + [f"package:{p.get('name', '')}" for p in m.get("packages", {}).get("publishes", [])]
+        entry = f"- {n} [{r['domain']}] {r['summary']}".rstrip()
+        if r["identifiers"]:
+            entry += "\n  known as: " + ", ".join(map(str, r["identifiers"]))
+        if provides:
+            entry += "\n  provides: " + ", ".join(provides)
+        entries.append(clip(entry, share))
+    return "\n".join(entries)
+
+
+def target_block(t):
+    consumers = sorted(t["consumers"])
+    lines = [f"### {t['key']}", f"kinds: {', '.join(sorted(k for k in t['kinds'] if k))}"]
+    lines.append("consumers:")
+    for repo in consumers[:CONSUMERS_SHOWN]:
+        row = t["consumers"][repo]
+        lines.append(f"  - {repo}: {row.get('name', t['key'])} ({row.get('evidence')})")
+    if len(consumers) > CONSUMERS_SHOWN:
+        lines.append(f"  ... and {len(consumers) - CONSUMERS_SHOWN} more")
+    if t["candidates"]:
+        lines.append("candidates: " + ", ".join(sorted(t["candidates"])))
+    return "\n".join(lines) + "\n"
+
+
+def suggest_batches(cfg, targets, directory):
+    """[(targets, prompt)], each prompt within resolver_budget_bytes: the directory goes in every
+    prompt and the targets fill what it leaves."""
+    budget = cfg["resolver_budget_bytes"]
+    shell = build_prompt(cfg, RESOLVER_PROMPT, DIRECTORY=directory, TARGETS="")
+    room = budget - len(shell.encode("utf-8")) - BUNDLE_MARGIN_BYTES
+    if room <= 0:
+        sys.exit(
+            f"resolver_budget_bytes {budget} leaves no room for targets after the prompt and "
+            f"repo directory ({len(shell.encode('utf-8'))} bytes); raise it"
+        )
+    batches, size = [], 0
+    for t in targets:
+        block = clip(target_block(t), room)
+        n = len(block.encode("utf-8")) + 1
+        if not batches or size + n > room:
+            batches.append([])
+            size = 0
+        batches[-1].append((t, block))
+        size += n
+    return [
+        (
+            [t for t, _ in batch],
+            build_prompt(
+                cfg, RESOLVER_PROMPT, DIRECTORY=directory, TARGETS="\n".join(b for _, b in batch)
+            ),
+        )
+        for batch in batches
+    ]
+
+
+def check_suggestion(item, asked, repo_names):
+    """(lowercased key, cleaned suggestion) for a usable answer, else (None, why it was dropped).
+    The model's word is checked against the graph here, so an answer naming a repo that does not
+    exist never reaches `resolve` as a one-keystroke default."""
+    if not isinstance(item, dict):
+        return None, f"not an object: {item!r}"
+    key = str(item.get("key", "")).strip()
+    t = asked.get(key.lower())
+    if t is None:
+        return None, f"{key!r} was not asked"
+    action = item.get("action")
+    if action not in SUGGEST_ACTIONS:
+        return None, f"{key}: unknown action {action!r}"
+
+    def text(field, limit=300):
+        return clip(redact(str(item.get(field) or "")).strip(), limit)
+
+    out = {"key": t["key"], "action": action}
+    if action == "link":
+        to = repo_names.get(str(item.get("to", "")).strip().lower())
+        if not to:
+            return None, f"{key}: no repo named {item.get('to')!r}"
+        if set(t["consumers"]) <= {to}:
+            return None, f"{key}: {to} is its only consumer"
+        out["to"] = to
+    elif action == "external":
+        ext = str(item.get("external", "")).strip()
+        if not REPO_NAME.fullmatch(ext):
+            return None, f"{key}: external id {item.get('external')!r} is not a plain name"
+        out["external"] = ext
+        out["label"] = text("label", 80) or ext
+    elif action == "generic":  # a tag only: whether consumers share one store is not its call
+        tag = str(item.get("tag", "")).strip().lower()
+        if not REPO_NAME.fullmatch(tag):
+            return None, f"{key}: tag {item.get('tag')!r} is not a plain name"
+        out["tag"] = tag
+    confidence = item.get("confidence")
+    out["confidence"] = confidence if confidence in CONFIDENCES else "low"
+    out["reason"] = text("reason")
+    out["basis"] = text("basis")
+    return key.lower(), out
+
+
+def ask_resolver(cfg, prompt, log):
+    """(answer, error, attempts). Unparseable output gets one retry, as in generate; a kiro-cli
+    failure does not, since the same command would fail the same way."""
+    error = None
+    for attempt in (1, 2):
+        try:
+            return (
+                run_kiro(cfg, cfg["atlas_dir"], prompt, log, "resolver", cfg["resolver_model"]),
+                None,
+                attempt,
+            )
+        except ValueError as e:
+            error = e
+        except (RuntimeError, OSError) as e:
+            return None, e, attempt
+    return None, error, 2
+
+
+def cmd_suggest(cfg, args, say=print):
+    """Draft an answer for each unresolved target with one tool-free model call per batch, for
+    `resolve` to offer. Nothing here changes the graph: a person accepts each answer there."""
+    ad = cfg["atlas_dir"]
+    path = suggestions_path(cfg)
+    with atlas_lock(ad):  # held throughout, as generate does: a second run would pay twice
+        graph = build(cfg, known_repo_names(cfg))
+        everything = unresolved_targets(graph)
+        stored = load_suggestions(path)
+        live = {t["key"].lower() for t in everything}
+        kept = {k: v for k, v in stored.items() if k in live}
+        phash = resolver_prompt_hash()
+        targets = everything[: args.top] if args.top else everything
+        todo = [
+            t
+            for t in targets
+            if args.all
+            or kept.get(t["key"].lower(), {}).get("fingerprint") != target_fingerprint(t, phash)
+        ]
+        current = len(targets) - len(todo)
+        if not todo:
+            if kept != stored:
+                write_suggestions(path, kept)
+            say(
+                f"nothing to suggest: {current} already current"
+                if current
+                else "nothing to suggest: no unresolved targets"
+            )
+            return
+        directory = repo_directory(cfg, graph, cfg["resolver_budget_bytes"] // 2)
+        batches = suggest_batches(cfg, todo, directory)
+        if args.dry_run:
+            for n, (batch, prompt) in enumerate(batches, 1):
+                say(f"batch {n}: {len(batch)} targets, {len(prompt.encode('utf-8')) / 1024:.1f} KB")
+            say(f"dry run: {len(todo)} targets in {len(batches)} calls; nothing spent")
+            return
+        log = ad / "logs" / "_resolver.log"
+        rotate_log(log)
+        repo_names = {n.lower(): n for n in graph["repos"]}
+        counts = dict.fromkeys(SUGGEST_ACTIONS, 0)
+        calls = dropped = failed = prompt_bytes = 0
+        for n, (batch, prompt) in enumerate(batches, 1):
+            answer, error, attempts = ask_resolver(cfg, prompt, log)
+            calls += attempts
+            prompt_bytes += attempts * len(prompt.encode("utf-8"))
+            items = answer.get("suggestions") if answer is not None else None
+            if not isinstance(items, list):
+                error = error or "the answer has no 'suggestions' list"
+                say(f"batch {n} failed ({len(batch)} targets): {error}")
+                failed += len(batch)
+                continue
+            asked = {t["key"].lower(): t for t in batch}
+            answered = set()
+            for item in items:
+                key, result = check_suggestion(item, asked, repo_names)
+                if key in answered:
+                    key, result = None, f"{key}: answered twice"
+                if key is None:
+                    dropped += 1
+                    if args.verbose:
+                        say(f"  dropped: {result}")
+                    continue
+                answered.add(key)
+                counts[result["action"]] += 1
+                kept[key] = {
+                    **result,
+                    "fingerprint": target_fingerprint(asked[key], phash),
+                    "model": cfg["resolver_model"],
+                    "generated_at": now().isoformat(timespec="seconds"),
+                }
+            write_suggestions(path, kept)  # per batch, so a killed run keeps what it paid for
+        write_suggestions(path, kept)
+    say(
+        f"suggest: {len(todo)} targets in {calls} calls | "
+        + ", ".join(f"{a} {counts[a]}" for a in SUGGEST_ACTIONS)
+        + f" | {dropped} dropped | {failed} failed | {current} already current"
+        + f" | {prompt_bytes / 1024:.0f} KB of prompts | saved to {path}"
+    )
+
+
 class StopResolve(Exception):
     """The operator quit or the input ended; every answer given so far is already saved."""
 
@@ -3276,6 +3554,13 @@ def main():
     p.add_argument("--apply", action="store_true", help="move orphan manifests to repos/_orphans")
     u = sub.add_parser("unresolved")
     u.add_argument("--top", type=int, default=25)
+    sg = sub.add_parser("suggest")
+    sg.add_argument("--top", type=positive_int, help="only the N targets with the most consumers")
+    sg.add_argument(
+        "--all", action="store_true", help="ask again even where a suggestion is current"
+    )
+    sg.add_argument("--dry-run", action="store_true", help="show the batches, spend nothing")
+    sg.add_argument("-v", "--verbose", action="store_true", help="list every dropped answer")
     r = sub.add_parser("resolve")
     r.add_argument("--top", type=positive_int, help="only the N targets with the most consumers")
     sub.add_parser("status")
@@ -3291,6 +3576,7 @@ def main():
         "build": cmd_build,
         "prune": cmd_prune,
         "unresolved": cmd_unresolved,
+        "suggest": cmd_suggest,
         "resolve": cmd_resolve,
         "status": cmd_status,
     }[args.cmd](cfg, args)
