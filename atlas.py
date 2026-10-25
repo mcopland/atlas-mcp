@@ -1884,7 +1884,7 @@ def rotate_log(log_path):
         log_path.replace(log_path.with_name(log_path.name + ".1"))
 
 
-def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
+def run_kiro(cfg, repo, prompt, log_path, mapper="explore", model=None):
     name = cfg["kiro_agent"] if cfg["kiro_agent"] is not None else DEFAULT_AGENTS[mapper]
     agent = ["--agent", name] if name else []
     # Bundle mode has already read the repo, so it runs outside it: a session started inside a
@@ -1898,7 +1898,7 @@ def run_kiro(cfg, repo, prompt, log_path, mapper="explore"):
         "--wrap",
         "never",
         "--model",
-        cfg["model"],
+        model or cfg["model"],
         *agent,
         *cfg["kiro_extra_args"],
     ]
@@ -3022,6 +3022,21 @@ def cmd_unresolved(cfg, args):
         print(f"      from: {', '.join(sorted(g['repos'])[:6])}")
 
 
+def unresolved_targets(graph, top=None):
+    """The unresolved consumes grouped by target, case-insensitively, most shared first."""
+    targets = {}
+    for u in graph["unresolved"]:
+        t = targets.setdefault(
+            u["key"].strip().lower(),
+            {"key": u["key"].strip(), "kinds": set(), "consumers": {}, "candidates": set()},
+        )
+        t["kinds"].add(u.get("kind", ""))
+        t["consumers"].setdefault(u["repo"], u)
+        t["candidates"].update(u.get("candidates", []))
+    rows = sorted(targets.values(), key=lambda t: (-len(t["consumers"]), t["key"].lower()))
+    return rows[:top] if top else rows
+
+
 class StopResolve(Exception):
     """The operator quit or the input ended; every answer given so far is already saved."""
 
@@ -3037,18 +3052,7 @@ def cmd_resolve(cfg, args, ask=input, say=print):
     path = cfg["resolve_overrides"]
     with atlas_lock(cfg["atlas_dir"]):  # not held while prompting: generate may run meanwhile
         graph = build(cfg, known_repo_names(cfg))
-    targets = {}
-    for u in graph["unresolved"]:
-        t = targets.setdefault(
-            u["key"].strip().lower(),
-            {"key": u["key"].strip(), "kinds": set(), "consumers": {}, "candidates": set()},
-        )
-        t["kinds"].add(u.get("kind", ""))
-        t["consumers"].setdefault(u["repo"], u)
-        t["candidates"].update(u.get("candidates", []))
-    rows = sorted(targets.values(), key=lambda t: (-len(t["consumers"]), t["key"].lower()))
-    if args.top:
-        rows = rows[: args.top]
+    rows = unresolved_targets(graph, args.top)
     if not rows:
         say("nothing to resolve: no unresolved targets")
         return

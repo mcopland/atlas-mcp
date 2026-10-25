@@ -196,6 +196,22 @@ def test_nothing_to_resolve(world):
     assert "nothing to resolve" in s.out
 
 
+def test_unresolved_targets_group_by_key_and_put_the_most_shared_first(world, graph_of):
+    cfg = world(
+        {
+            "a": consume("RARE_URL"),
+            "b": consume("Common_URL"),
+            "c": consume("COMMON_URL", "http"),
+        }
+    )
+    targets = atlas.unresolved_targets(graph_of(cfg))
+    assert [(t["key"], sorted(t["consumers"]), sorted(t["kinds"])) for t in targets] == [
+        ("Common_URL", ["b", "c"], ["http", "other"]),
+        ("RARE_URL", ["a"], ["other"]),
+    ]
+    assert [t["key"] for t in atlas.unresolved_targets(graph_of(cfg), top=1)] == ["Common_URL"]
+
+
 def test_main_dispatches_resolve(make_cfg, tmp_path, monkeypatch):
     make_cfg()
     seen = {}

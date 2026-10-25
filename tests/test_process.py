@@ -319,6 +319,14 @@ def test_explore_mode_uses_the_read_only_mapper_agent(make_cfg, monkeypatch, tmp
     assert cmd[cmd.index("--agent") + 1] == "atlas-mapper"
 
 
+def test_a_model_override_replaces_the_configured_model(make_cfg, monkeypatch, tmp_path):
+    cfg = make_cfg(model="small")
+    seen = _spy_popen(monkeypatch)
+    atlas.run_kiro(cfg, tmp_path, "p", tmp_path / "logs" / "svc.log", model="large")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "large"
+
+
 def test_empty_kiro_agent_drops_the_agent_flag(make_cfg, monkeypatch, tmp_path):
     cfg = make_cfg(kiro_agent="")
     seen = _spy_popen(monkeypatch)
