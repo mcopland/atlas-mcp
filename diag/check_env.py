@@ -73,7 +73,7 @@ def check_system(report: Report) -> None:
 def check_python(report: Report) -> None:
     with report.section("python") as s:
         s.ok(f"running interpreter: {sys.version.splitlines()[0]} at {scrub(sys.executable)}")
-        if sys.version_info < (3, 11):
+        if sys.version_info < (3, 11):  # noqa: UP036  diag runs on Python 3.8+ (PEP 723)
             s.warn("this interpreter is below 3.11; atlas.py and atlas_mcp.py need 3.11+")
         else:
             s.ok("interpreter satisfies atlas's >=3.11 requirement")

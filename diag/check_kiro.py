@@ -313,7 +313,7 @@ def live_mcp(report: Report, atlas, cfg: dict, tmp: Path) -> None:
 
 
 def run_live(report: Report, user_cfg: dict, tmp: Path) -> None:
-    if sys.version_info < (3, 11):
+    if sys.version_info < (3, 11):  # noqa: UP036  diag runs on Python 3.8+ (PEP 723)
         with report.section("live") as s:
             s.skip(
                 "--live needs Python 3.11+ to import atlas.py; rerun with "

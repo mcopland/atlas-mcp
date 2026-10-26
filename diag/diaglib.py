@@ -74,7 +74,7 @@ def kiro_home() -> Path:
 def try_import_atlas() -> types.ModuleType | None:
     """`atlas` needs Python 3.11+ (tomllib, dt.UTC). Return None rather than raising when the
     running interpreter cannot import it, so callers can SKIP instead of crashing."""
-    if sys.version_info < (3, 11):
+    if sys.version_info < (3, 11):  # noqa: UP036  diag runs on Python 3.8+ (PEP 723)
         return None
     if str(KIT) not in sys.path:
         sys.path.insert(0, str(KIT))
