@@ -311,7 +311,7 @@ def inspect_kiro_home(kiro_home: Path, kit: Path) -> dict[str, Any]:
         if command and not os.path.isabs(command):
             result["warnings"].append(f"{label}: command {command!r} is relative, not absolute")
 
-    for name in ("atlas.json", "atlas-bundle.json", "atlas-mapper.json"):
+    for name in ("atlas.json", "atlas-bundle.json", "atlas-mapper.json", "atlas-resolver.json"):
         installed = kiro_home / "agents" / name
         repo_copy = kit / "kiro" / "agents" / name
         if not installed.is_file() or not repo_copy.is_file():
