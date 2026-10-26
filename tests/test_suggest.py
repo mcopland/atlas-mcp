@@ -149,9 +149,23 @@ def test_a_new_consumer_asks_again(orders, make_repo, make_manifest, monkeypatch
         {"key": "ORDERS_BACKEND", "action": "delete"},
         {"key": "ORDERS_BACKEND", "action": "external", "external": "not a name!"},
         {"key": "ORDERS_BACKEND", "action": "generic", "tag": ""},
+        {"key": "ORDERS_BACKEND", "action": "external", "external": None},
+        {"key": "ORDERS_BACKEND", "action": "generic", "tag": None},
+        link(to=None),
         "not an object",
     ],
-    ids=["unknown-repo", "sole-consumer", "not-asked", "bad-action", "bad-id", "no-tag", "shape"],
+    ids=[
+        "unknown-repo",
+        "sole-consumer",
+        "not-asked",
+        "bad-action",
+        "bad-id",
+        "no-tag",
+        "null-id",
+        "null-tag",
+        "null-repo",
+        "shape",
+    ],
 )
 def test_an_invalid_answer_is_dropped_and_counted(world, monkeypatch, item):
     cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
@@ -203,6 +217,16 @@ def test_strings_the_model_wrote_are_redacted(orders, monkeypatch):
     token = "ghp_" + "A" * 36
     run(cfg, FakeKiro(answer(link(reason=f"saw {token}"))), monkeypatch)
     assert token not in atlas.suggestions_path(cfg).read_text()
+
+
+def test_control_characters_the_model_wrote_are_removed(orders, monkeypatch):
+    cfg = orders()
+    run(cfg, FakeKiro(answer(link(reason="ok\x1b[2K\x1b]0;title\x07 fine"))), monkeypatch)
+    reason = stored(cfg)["orders_backend"]["reason"]
+    assert "\x1b" not in reason
+    assert "\x07" not in reason
+    assert reason.startswith("ok")
+    assert reason.endswith("fine")
 
 
 def test_dry_run_makes_no_call_and_writes_nothing(orders, monkeypatch):

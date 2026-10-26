@@ -3053,6 +3053,7 @@ SUGGEST_ACTIONS = (*OVERRIDE_ACTIONS, "none")
 CONFIDENCES = ("high", "medium", "low")
 REPO_ENTRY_BYTES = 1200
 CONSUMERS_SHOWN = 10
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def suggestions_path(cfg):
@@ -3060,21 +3061,21 @@ def suggestions_path(cfg):
 
 
 def load_suggestions(path):
-    """Drafted answers from `suggest`, keyed by lowercased target. A malformed file stops the
-    run instead of being overwritten, since it may hold answers nobody has reviewed yet."""
-
-    def bad(problem):
-        sys.exit(f"invalid resolve suggestions {path}: {problem}")
-
+    """Drafted answers from `suggest`, keyed by lowercased target. Raises ValueError on a
+    malformed file: `suggest` stops rather than overwrite answers nobody has reviewed yet, while
+    `resolve` can go on without them."""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:
-        return bad(e)
+        raise ValueError(f"invalid resolve suggestions {path}: {e}") from e
     found = doc.get("suggestions", {}) if isinstance(doc, dict) else None
     if not isinstance(found, dict) or not all(isinstance(v, dict) for v in found.values()):
-        bad("expected an object whose 'suggestions' maps each target to an object")
+        raise ValueError(
+            f"invalid resolve suggestions {path}: expected an object whose 'suggestions' maps "
+            "each target to an object"
+        )
     return found
 
 
@@ -3188,25 +3189,31 @@ def check_suggestion(item, asked, repo_names):
     if action not in SUGGEST_ACTIONS:
         return None, f"{key}: unknown action {action!r}"
 
+    def name(field):  # a JSON null or number must not become the plain name "None" or "5"
+        value = item.get(field)
+        return value.strip() if isinstance(value, str) else ""
+
     def text(field, limit=300):
-        return clip(redact(str(item.get(field) or "")).strip(), limit)
+        # resolve prints these to a terminal, and a decoded JSON string can carry raw escapes
+        cleaned = CONTROL_CHARS.sub("", redact(str(item.get(field) or "")))
+        return clip(cleaned.strip(), limit)
 
     out = {"key": t["key"], "action": action}
     if action == "link":
-        to = repo_names.get(str(item.get("to", "")).strip().lower())
+        to = repo_names.get(name("to").lower())
         if not to:
             return None, f"{key}: no repo named {item.get('to')!r}"
         if set(t["consumers"]) <= {to}:
             return None, f"{key}: {to} is its only consumer"
         out["to"] = to
     elif action == "external":
-        ext = str(item.get("external", "")).strip()
+        ext = name("external")
         if not REPO_NAME.fullmatch(ext):
             return None, f"{key}: external id {item.get('external')!r} is not a plain name"
         out["external"] = ext
         out["label"] = text("label", 80) or ext
     elif action == "generic":  # a tag only: whether consumers share one store is not its call
-        tag = str(item.get("tag", "")).strip().lower()
+        tag = name("tag").lower()
         if not REPO_NAME.fullmatch(tag):
             return None, f"{key}: tag {item.get('tag')!r} is not a plain name"
         out["tag"] = tag
@@ -3243,7 +3250,10 @@ def cmd_suggest(cfg, args, say=print):
     with atlas_lock(ad):  # held throughout, as generate does: a second run would pay twice
         graph = build(cfg, known_repo_names(cfg))
         everything = unresolved_targets(graph)
-        stored = load_suggestions(path)
+        try:
+            stored = load_suggestions(path)
+        except ValueError as e:
+            sys.exit(str(e))
         live = {t["key"].lower() for t in everything}
         kept = {k: v for k, v in stored.items() if k in live}
         phash = resolver_prompt_hash()
@@ -3346,28 +3356,29 @@ def cmd_resolve(cfg, args, ask=input, say=print):
     with atlas_lock(cfg["atlas_dir"]):  # not held while prompting: generate may run meanwhile
         graph = build(cfg, known_repo_names(cfg))
     repo_names = {n.lower(): n for n in graph["repos"]}
-    drafts = load_suggestions(suggestions_path(cfg))
+    try:
+        drafts = load_suggestions(suggestions_path(cfg))
+    except ValueError as e:
+        say(f"warn: {e}; going on without suggestions")
+        drafts = {}
     phash = resolver_prompt_hash()
 
     def current(t):
-        """The drafted answer for t, unless what it was drafted from has changed since."""
+        """The drafted answer for t, cleaned, or None when what it was drafted from has changed
+        or it no longer passes: a repo can be renamed, and the file edited by hand, after
+        `suggest` checked it."""
         d = drafts.get(t["key"].lower())
-        return d if d and d.get("fingerprint") == target_fingerprint(t, phash) else None
+        if not d or d.get("fingerprint") != target_fingerprint(t, phash):
+            return None
+        key, clean = check_suggestion(d, {t["key"].lower(): t}, repo_names)
+        return clean if key else None
 
-    def acceptable(t, d):
-        """Whether Enter may take d as it stands: the file is checked again, because a repo
-        can be renamed, and the file edited by hand, after `suggest` wrote it."""
-        action = (d or {}).get("action")
-        if action == "link":
-            to = repo_names.get(str(d.get("to", "")).lower())
-            return bool(to) and not set(t["consumers"]) <= {to}
-        if action in ("external", "generic"):
-            return bool(REPO_NAME.fullmatch(str(d.get(OVERRIDE_ACTIONS[action], ""))))
-        return False
+    def acceptable(d):
+        return d is not None and d["action"] != "none"
 
     rows = unresolved_targets(graph)
     if args.suggested:
-        rows = [t for t in rows if acceptable(t, current(t))]
+        rows = [t for t in rows if acceptable(current(t))]
     rows = rows[: args.top] if args.top else rows
     if not rows:
         say(
@@ -3447,11 +3458,11 @@ def cmd_resolve(cfg, args, ask=input, say=print):
 
     def accept(key, consumers, d):
         if d["action"] == "link":
-            return link(key, consumers, repo_names[d["to"].lower()])
+            return link(key, consumers, d["to"])
         if d["action"] == "external":
-            return external(key, consumers, d["external"], lambda: d.get("label"))
+            return external(key, consumers, d["external"], lambda: d["label"])
         return [
-            {"key": key, "repo": r, "action": "generic", "tag": d["tag"].lower()} for r in consumers
+            {"key": key, "repo": r, "action": "generic", "tag": d["tag"]} for r in consumers
         ], {}
 
     def decide(t, consumers, candidates, may_split, offer=None):
@@ -3526,7 +3537,7 @@ def cmd_resolve(cfg, args, ask=input, say=print):
             draft = current(t)
             if draft:
                 say(f"  suggested: {describe_suggestion(draft)}")
-            offer = draft if acceptable(t, draft) else None
+            offer = draft if acceptable(draft) else None
             outcome = decide(t, consumers, candidates, len(consumers) > 1, offer)
             if outcome == SPLIT:
                 for repo in consumers:

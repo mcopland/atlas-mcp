@@ -2,9 +2,9 @@ import argparse
 import json
 
 import pytest
+from conftest import consume
 
 import atlas
-from conftest import consume
 
 
 class Session:
@@ -311,7 +311,8 @@ def test_enter_accepts_a_suggested_generic_and_keeps_consumers_separate(world, g
         ("b", "mongo"),
     }
     assert all("group" not in t for t in saved(cfg)["targets"])
-    assert len(g["generic"]) == 2 and g["shared_datastores"] == []
+    assert len(g["generic"]) == 2
+    assert g["shared_datastores"] == []
 
 
 def test_a_stale_suggestion_is_not_offered(world, graph_of):
@@ -372,7 +373,8 @@ def test_suggested_walks_only_targets_with_an_answer_to_accept(world, graph_of):
     s = Session("")
     run(cfg, s, suggested=True)
     assert "ORDERS_BACKEND" in s.out
-    assert "OTHER_URL" not in s.out and "MYSTERY_URL" not in s.out
+    assert "OTHER_URL" not in s.out
+    assert "MYSTERY_URL" not in s.out
     assert len(saved(cfg)["targets"]) == 1
 
 
@@ -383,9 +385,37 @@ def test_suggested_with_nothing_to_accept_says_so(world):
     assert "nothing to resolve: no current suggestions" in s.out
 
 
-def test_a_malformed_suggestions_file_stops_resolve_with_its_path(world):
+def test_a_malformed_suggestions_file_is_reported_and_resolve_goes_on_without_it(world):
     cfg = world({"client": consume("MYSTERY_URL")})
     atlas.suggestions_path(cfg).write_text("[]")
-    with pytest.raises(SystemExit) as e:
-        run(cfg, Session())
-    assert str(atlas.suggestions_path(cfg)) in str(e.value)
+    s = Session("e", "vendor", "Vendor")
+    run(cfg, s)
+    assert str(atlas.suggestions_path(cfg)) in s.out
+    assert saved(cfg)["targets"][0]["external"] == "vendor"
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        {"action": "external", "external": 5},
+        {"action": "link", "to": 123},
+        {"action": "generic", "tag": None},
+    ],
+    ids=["int-external", "int-repo", "null-tag"],
+)
+def test_a_hand_edited_draft_that_is_not_valid_is_not_offered(world, graph_of, draft):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", **draft)
+    s = Session("")
+    run(cfg, s)
+    assert "[enter] accept" not in s.prompts[0]
+    assert not cfg["resolve_overrides"].exists()
+
+
+def test_control_characters_in_a_hand_edited_draft_never_reach_the_terminal(world, graph_of):
+    cfg = world({"orders-svc": [], "client": consume("ORDERS_BACKEND")})
+    suggest(cfg, graph_of, "ORDERS_BACKEND", action="link", to="orders-svc", reason="a\x1b[2Kb")
+    s = Session("")
+    run(cfg, s)
+    assert "\x1b" not in s.out
+    assert saved(cfg)["targets"][0]["to"] == "orders-svc"
